@@ -1,8 +1,9 @@
 import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
 import { z } from '@hono/zod-openapi';
-import { getDb } from '../db';
-import { authMiddleware } from '../middleware/auth';
+import { getDb, type Database } from '../db';
+import { authMiddleware, adminOnly } from '../middleware/auth';
 import { uuid, now, type HonoEnv } from '../types';
+import { ErrorResponse } from '../schemas';
 import { isBot } from '../lib/bot-detect';
 
 // ============================================================
@@ -136,6 +137,301 @@ app.openapi(trackEvent, async (c) => {
   );
 
   return c.body(null, 204);
+});
+
+// ============================================================
+// SUMMARY SCHEMAS
+// ============================================================
+
+const PeriodQuery = z.object({
+  period: z.enum(['7d', '30d', '90d']).default('30d').openapi({
+    param: { name: 'period', in: 'query' },
+    example: '30d',
+  }),
+});
+
+const TopProduct = z.object({
+  product_id: z.string(),
+  product_name: z.string(),
+  views: z.number().int(),
+  add_to_carts: z.number().int(),
+  purchases: z.number().int(),
+});
+
+const TopPage = z.object({
+  page_path: z.string(),
+  views: z.number().int(),
+});
+
+const TopReferrer = z.object({
+  referrer: z.string(),
+  count: z.number().int(),
+});
+
+const DailyStat = z.object({
+  date: z.string(),
+  visitors: z.number().int(),
+  page_views: z.number().int(),
+  orders: z.number().int(),
+  revenue_cents: z.number().int(),
+});
+
+const DeviceBreakdown = z.object({
+  desktop: z.number().int(),
+  mobile: z.number().int(),
+  tablet: z.number().int(),
+});
+
+const PeriodMetrics = z.object({
+  visitors: z.number().int(),
+  page_views: z.number().int(),
+  orders: z.number().int(),
+  revenue_cents: z.number().int(),
+});
+
+const SummaryResponse = z.object({
+  visitors: z.number().int(),
+  page_views: z.number().int(),
+  orders: z.number().int(),
+  revenue_cents: z.number().int(),
+  top_products: z.array(TopProduct),
+  top_pages: z.array(TopPage),
+  top_referrers: z.array(TopReferrer),
+  daily_stats: z.array(DailyStat),
+  prior_period: PeriodMetrics,
+  device_breakdown: DeviceBreakdown,
+}).openapi('AnalyticsSummary');
+
+// ============================================================
+// SUMMARY HELPERS
+// ============================================================
+
+function periodToDays(period: '7d' | '30d' | '90d'): number {
+  switch (period) {
+    case '7d': return 7;
+    case '30d': return 30;
+    case '90d': return 90;
+  }
+}
+
+function dateRangeISO(days: number, offsetDays = 0): { start: string; end: string } {
+  const end = new Date();
+  end.setUTCDate(end.getUTCDate() - offsetDays);
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - days);
+  return {
+    start: start.toISOString(),
+    end: end.toISOString(),
+  };
+}
+
+/**
+ * Extract the domain from a referrer URL string. Returns the hostname
+ * or the raw string if parsing fails.
+ */
+function extractDomain(referrer: string): string {
+  try {
+    return new URL(referrer).hostname;
+  } catch {
+    return referrer;
+  }
+}
+
+async function queryPeriodMetrics(
+  db: Database,
+  start: string,
+  end: string,
+): Promise<{ visitors: number; page_views: number; orders: number; revenue_cents: number }> {
+  const [visitors] = await db.query<{ count: number }>(
+    `SELECT COUNT(DISTINCT session_id) as count FROM analytics_events WHERE created_at >= ? AND created_at < ?`,
+    [start, end],
+  );
+
+  const [pageViews] = await db.query<{ count: number }>(
+    `SELECT COUNT(*) as count FROM analytics_events WHERE event_type = 'page_view' AND created_at >= ? AND created_at < ?`,
+    [start, end],
+  );
+
+  const [orders] = await db.query<{ count: number }>(
+    `SELECT COUNT(*) as count FROM analytics_events WHERE event_type = 'order_completed' AND created_at >= ? AND created_at < ?`,
+    [start, end],
+  );
+
+  const [revenue] = await db.query<{ total: number | null }>(
+    `SELECT COALESCE(SUM(json_extract(event_data, '$.order_total_cents')), 0) as total FROM analytics_events WHERE event_type = 'order_completed' AND created_at >= ? AND created_at < ?`,
+    [start, end],
+  );
+
+  return {
+    visitors: visitors?.count ?? 0,
+    page_views: pageViews?.count ?? 0,
+    orders: orders?.count ?? 0,
+    revenue_cents: revenue?.total ?? 0,
+  };
+}
+
+// ============================================================
+// SUMMARY ROUTE
+// ============================================================
+
+const getSummary = createRoute({
+  method: 'get',
+  path: '/summary',
+  tags: ['Analytics'],
+  summary: 'Get analytics summary',
+  description: 'Returns aggregated analytics metrics for the specified period. Admin access required.',
+  security: [{ bearerAuth: [] }],
+  middleware: [adminOnly] as const,
+  request: {
+    query: PeriodQuery,
+  },
+  responses: {
+    200: { content: { 'application/json': { schema: SummaryResponse } }, description: 'Analytics summary' },
+    403: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Forbidden' },
+  },
+});
+
+app.openapi(getSummary, async (c) => {
+  const { period } = c.req.valid('query');
+  const db = getDb(c.var.db);
+  const days = periodToDays(period);
+
+  // Current period range
+  const current = dateRangeISO(days, 0);
+  // Prior period range (the equivalent window immediately before the current one)
+  const prior = dateRangeISO(days, days);
+
+  // --- Core metrics (current + prior) ---
+  const [currentMetrics, priorMetrics] = await Promise.all([
+    queryPeriodMetrics(db, current.start, current.end),
+    queryPeriodMetrics(db, prior.start, prior.end),
+  ]);
+
+  // --- Top products ---
+  const topProducts = await db.query<{
+    product_id: string;
+    product_name: string;
+    views: number;
+    add_to_carts: number;
+    purchases: number;
+  }>(
+    `SELECT
+       json_extract(event_data, '$.product_id') as product_id,
+       COALESCE(json_extract(event_data, '$.product_name'), json_extract(event_data, '$.product_id')) as product_name,
+       SUM(CASE WHEN event_type = 'product_view' THEN 1 ELSE 0 END) as views,
+       SUM(CASE WHEN event_type = 'add_to_cart' THEN 1 ELSE 0 END) as add_to_carts,
+       SUM(CASE WHEN event_type = 'order_completed' THEN 1 ELSE 0 END) as purchases
+     FROM analytics_events
+     WHERE json_extract(event_data, '$.product_id') IS NOT NULL
+       AND created_at >= ? AND created_at < ?
+     GROUP BY json_extract(event_data, '$.product_id')
+     ORDER BY views DESC
+     LIMIT 10`,
+    [current.start, current.end],
+  );
+
+  // --- Top pages ---
+  const topPages = await db.query<{ page_path: string; views: number }>(
+    `SELECT page_path, COUNT(*) as views
+     FROM analytics_events
+     WHERE event_type = 'page_view'
+       AND created_at >= ? AND created_at < ?
+     GROUP BY page_path
+     ORDER BY views DESC
+     LIMIT 10`,
+    [current.start, current.end],
+  );
+
+  // --- Top referrers (raw, grouped by domain in code) ---
+  const referrerRows = await db.query<{ referrer: string; count: number }>(
+    `SELECT referrer, COUNT(*) as count
+     FROM analytics_events
+     WHERE referrer IS NOT NULL AND referrer != ''
+       AND created_at >= ? AND created_at < ?
+     GROUP BY referrer
+     ORDER BY count DESC`,
+    [current.start, current.end],
+  );
+
+  // Group referrers by domain
+  const domainMap = new Map<string, number>();
+  for (const row of referrerRows) {
+    const domain = extractDomain(row.referrer);
+    domainMap.set(domain, (domainMap.get(domain) ?? 0) + row.count);
+  }
+  const topReferrers = Array.from(domainMap.entries())
+    .map(([referrer, count]) => ({ referrer, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
+  // --- Daily stats ---
+  const dailyStats = await db.query<{
+    date: string;
+    visitors: number;
+    page_views: number;
+    orders: number;
+    revenue_cents: number;
+  }>(
+    `SELECT
+       DATE(created_at) as date,
+       COUNT(DISTINCT session_id) as visitors,
+       SUM(CASE WHEN event_type = 'page_view' THEN 1 ELSE 0 END) as page_views,
+       SUM(CASE WHEN event_type = 'order_completed' THEN 1 ELSE 0 END) as orders,
+       COALESCE(SUM(CASE WHEN event_type = 'order_completed' THEN json_extract(event_data, '$.order_total_cents') ELSE 0 END), 0) as revenue_cents
+     FROM analytics_events
+     WHERE created_at >= ? AND created_at < ?
+     GROUP BY DATE(created_at)
+     ORDER BY date ASC`,
+    [current.start, current.end],
+  );
+
+  // Fill in missing days with zeroed metrics
+  const dailyMap = new Map(dailyStats.map((d) => [d.date, d]));
+  const filledDaily: Array<{ date: string; visitors: number; page_views: number; orders: number; revenue_cents: number }> = [];
+  const cursor = new Date(current.start);
+  const endDate = new Date(current.end);
+  while (cursor < endDate) {
+    const dateStr = cursor.toISOString().slice(0, 10);
+    filledDaily.push(
+      dailyMap.get(dateStr) ?? { date: dateStr, visitors: 0, page_views: 0, orders: 0, revenue_cents: 0 },
+    );
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  // --- Device breakdown ---
+  const deviceRows = await db.query<{ device_type: string; count: number }>(
+    `SELECT device_type, COUNT(*) as count
+     FROM analytics_sessions
+     WHERE first_seen_at >= ? AND first_seen_at < ?
+     GROUP BY device_type`,
+    [current.start, current.end],
+  );
+
+  const deviceBreakdown = { desktop: 0, mobile: 0, tablet: 0 };
+  for (const row of deviceRows) {
+    if (row.device_type === 'desktop' || row.device_type === 'mobile' || row.device_type === 'tablet') {
+      deviceBreakdown[row.device_type] = row.count;
+    }
+  }
+
+  return c.json({
+    ...currentMetrics,
+    top_products: topProducts.map((p) => ({
+      product_id: p.product_id,
+      product_name: p.product_name,
+      views: p.views,
+      add_to_carts: p.add_to_carts,
+      purchases: p.purchases,
+    })),
+    top_pages: topPages.map((p) => ({
+      page_path: p.page_path,
+      views: p.views,
+    })),
+    top_referrers: topReferrers,
+    daily_stats: filledDaily,
+    prior_period: priorMetrics,
+    device_breakdown: deviceBreakdown,
+  }, 200);
 });
 
 export { app as analytics };
