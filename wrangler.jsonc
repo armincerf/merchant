@@ -1,0 +1,39 @@
+{
+  "name": "merchant",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-12-01",
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MERCHANT",
+        "class_name": "MerchantDO"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MerchantDO"]
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "IMAGES"
+    }
+  ],
+
+  "vars": {
+    "IMAGES_URL": ""
+  },
+
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+
+  "dev": {
+    "port": 8787
+  }
+}
