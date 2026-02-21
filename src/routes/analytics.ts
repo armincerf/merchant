@@ -434,4 +434,106 @@ app.openapi(getSummary, async (c) => {
   }, 200);
 });
 
+// ============================================================
+// FUNNEL SCHEMAS
+// ============================================================
+
+const FunnelStep = z.object({
+  name: z.string().openapi({ example: 'Page View' }),
+  event_type: z.string().openapi({ example: 'page_view' }),
+  unique_sessions: z.number().int().openapi({ example: 1000 }),
+  drop_off_pct: z.number().openapi({ example: 0, description: 'Percentage decrease from previous step. First step = 0.' }),
+}).openapi('FunnelStep');
+
+const FunnelResponse = z.object({
+  period: z.enum(['7d', '30d', '90d']).openapi({ example: '30d' }),
+  steps: z.array(FunnelStep),
+}).openapi('ConversionFunnel');
+
+// ============================================================
+// FUNNEL ROUTE
+// ============================================================
+
+const FUNNEL_STEPS = [
+  { name: 'Page View', event_type: 'page_view' },
+  { name: 'Product View', event_type: 'product_view' },
+  { name: 'Add to Cart', event_type: 'add_to_cart' },
+  { name: 'Checkout Started', event_type: 'checkout_started' },
+  { name: 'Order Completed', event_type: 'order_completed' },
+] as const;
+
+const getFunnel = createRoute({
+  method: 'get',
+  path: '/funnel',
+  tags: ['Analytics'],
+  summary: 'Get conversion funnel',
+  description: 'Returns conversion funnel data showing drop-off between each step. Admin access required.',
+  security: [{ bearerAuth: [] }],
+  middleware: [adminOnly] as const,
+  request: {
+    query: PeriodQuery,
+  },
+  responses: {
+    200: { content: { 'application/json': { schema: FunnelResponse } }, description: 'Conversion funnel data' },
+    403: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Forbidden' },
+  },
+});
+
+app.openapi(getFunnel, async (c) => {
+  const { period } = c.req.valid('query');
+  const db = getDb(c.var.db);
+  const days = periodToDays(period);
+  const { start, end } = dateRangeISO(days, 0);
+
+  // For a true funnel, each step only counts sessions that also appeared in all
+  // previous steps. We build up a running intersection of session sets.
+  let previousSessions: Set<string> | null = null;
+
+  const steps: Array<{ name: string; event_type: string; unique_sessions: number; drop_off_pct: number }> = [];
+
+  for (const step of FUNNEL_STEPS) {
+    // Get distinct sessions for this event type in the period
+    const rows = await db.query<{ session_id: string }>(
+      `SELECT DISTINCT session_id FROM analytics_events WHERE event_type = ? AND created_at >= ? AND created_at < ?`,
+      [step.event_type, start, end],
+    );
+
+    const currentSessions = new Set(rows.map((r) => r.session_id));
+
+    // Intersect with previous step's sessions (true funnel)
+    let funnelSessions: Set<string>;
+    if (previousSessions === null) {
+      // First step: no intersection needed
+      funnelSessions = currentSessions;
+    } else {
+      // Only keep sessions that were in the previous step AND this step
+      funnelSessions = new Set<string>();
+      for (const sid of currentSessions) {
+        if (previousSessions.has(sid)) {
+          funnelSessions.add(sid);
+        }
+      }
+    }
+
+    const uniqueSessions = funnelSessions.size;
+    const previousCount = steps.length > 0 ? steps[steps.length - 1].unique_sessions : 0;
+
+    const dropOffPct =
+      steps.length === 0 || previousCount === 0
+        ? 0
+        : Math.round(((previousCount - uniqueSessions) / previousCount) * 10000) / 100;
+
+    steps.push({
+      name: step.name,
+      event_type: step.event_type,
+      unique_sessions: uniqueSessions,
+      drop_off_pct: dropOffPct,
+    });
+
+    previousSessions = funnelSessions;
+  }
+
+  return c.json({ period, steps }, 200);
+});
+
 export { app as analytics };
