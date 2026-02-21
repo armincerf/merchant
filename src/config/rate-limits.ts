@@ -46,6 +46,11 @@ export const rateLimits = {
       requests: 20,
       windowMs: 60 * 1000,
     },
+    // Analytics events from frontend (fire-and-forget)
+    '/v1/analytics': {
+      requests: 60,
+      windowMs: 60 * 1000,
+    },
   },
 
   // IPs/keys to never rate limit (e.g., internal services)
