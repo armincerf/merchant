@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS products (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS product_images (
+  id TEXT PRIMARY KEY,
+  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_product_images_product ON product_images(product_id);
+
 CREATE TABLE IF NOT EXISTS variants (
   id TEXT PRIMARY KEY,
   product_id TEXT NOT NULL REFERENCES products(id),
@@ -50,7 +59,7 @@ CREATE TABLE IF NOT EXISTS variants (
   title TEXT NOT NULL,
   price_cents INTEGER NOT NULL,
   currency TEXT NOT NULL DEFAULT 'USD',
-  weight_g INTEGER NOT NULL,
+  weight_grams INTEGER,
   dims_cm TEXT,
   image_url TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'draft')),
@@ -295,6 +304,27 @@ CREATE TABLE IF NOT EXISTS ucp_checkout_sessions (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS analytics_sessions (
+  id TEXT PRIMARY KEY,
+  first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  page_count INTEGER NOT NULL DEFAULT 0,
+  ip_country TEXT,
+  device_type TEXT CHECK (device_type IN ('mobile', 'desktop', 'tablet'))
+);
+
+CREATE TABLE IF NOT EXISTS analytics_events (
+  id TEXT PRIMARY KEY,
+  session_id TEXT REFERENCES analytics_sessions(id),
+  event_type TEXT NOT NULL,
+  event_data TEXT,
+  page_path TEXT,
+  referrer TEXT,
+  user_agent TEXT,
+  ip_country TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
 CREATE INDEX IF NOT EXISTS idx_variants_sku ON variants(sku);
@@ -335,6 +365,9 @@ CREATE INDEX IF NOT EXISTS idx_events_type_processed ON events(type, processed_a
 CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_status ON ucp_checkout_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_stripe ON ucp_checkout_sessions(stripe_session_id);
 CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_expires ON ucp_checkout_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_analytics_events_type_created ON analytics_events(event_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_analytics_events_session ON analytics_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_events_page_created ON analytics_events(page_path, created_at);
 `;
 
 export class MerchantDO extends DurableObject<MerchantEnv> {
