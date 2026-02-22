@@ -58,11 +58,20 @@ export const UpdateVariantBody = z.object({
 
 export const ProductStatus = z.enum(['active', 'draft']);
 
+export const ProductImageResponse = z.object({
+  id: z.string().uuid(),
+  image_url: z.string().openapi({ example: 'https://example.com/image.jpg' }),
+  position: z.number().int().openapi({ example: 0 }),
+}).openapi('ProductImage');
+
 export const ProductResponse = z.object({
   id: z.string().uuid(),
   title: z.string().openapi({ example: 'Classic T-Shirt' }),
+  slug: z.string().openapi({ example: 'classic-t-shirt' }),
   description: z.string().nullable().openapi({ example: 'A comfortable cotton tee' }),
+  image_url: z.string().nullable().openapi({ example: 'https://example.com/image.jpg' }),
   status: ProductStatus,
+  images: z.array(ProductImageResponse),
   created_at: z.string().datetime(),
   variants: z.array(VariantResponse),
 }).openapi('Product');
@@ -74,12 +83,16 @@ export const ProductListResponse = z.object({
 
 export const CreateProductBody = z.object({
   title: z.string().min(1).openapi({ example: 'Classic T-Shirt' }),
+  slug: z.string().min(1).optional().openapi({ example: 'classic-t-shirt' }),
   description: z.string().optional().openapi({ example: 'A comfortable cotton tee' }),
+  image_url: z.string().url().optional().openapi({ example: 'https://example.com/image.jpg' }),
 }).openapi('CreateProduct');
 
 export const UpdateProductBody = z.object({
   title: z.string().min(1).optional(),
+  slug: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
+  image_url: z.string().url().nullable().optional(),
   status: ProductStatus.optional(),
 }).openapi('UpdateProduct');
 
@@ -114,6 +127,15 @@ export const InventoryQuery = PaginationQuery.extend({
   sku: z.string().optional().openapi({ param: { name: 'sku', in: 'query' }, example: 'TEE-BLK-M' }),
   low_stock: z.string().optional().openapi({ param: { name: 'low_stock', in: 'query' } }),
 });
+
+export const AvailabilityItem = z.object({
+  sku: z.string().openapi({ example: 'TEE-BLK-M' }),
+  available: z.number().int().openapi({ example: 95 }),
+}).openapi('AvailabilityItem');
+
+export const AvailabilityResponse = z.object({
+  items: z.array(AvailabilityItem),
+}).openapi('AvailabilityResponse');
 
 export const AdjustmentReason = z.enum(['restock', 'correction', 'damaged', 'return']);
 
@@ -173,6 +195,11 @@ export const AddCartItemsBody = z.object({
     qty: z.number().int().positive().openapi({ example: 2 }),
   })).min(1),
 }).openapi('AddCartItems');
+
+export const AddCartItemBody = z.object({
+  sku: z.string().min(1).openapi({ example: 'TEE-BLK-M' }),
+  qty: z.number().int().openapi({ example: 1, description: 'Positive to add, negative to remove' }),
+}).openapi('AddCartItem');
 
 export const CheckoutBody = z.object({
   success_url: z.string().url().openapi({ example: 'https://example.com/success' }),
@@ -553,6 +580,7 @@ export const ImageUploadResponse = z.object({
 // ============================================================
 
 export type Product = z.infer<typeof ProductResponse>;
+export type ProductImage = z.infer<typeof ProductImageResponse>;
 export type Variant = z.infer<typeof VariantResponse>;
 export type Order = z.infer<typeof OrderResponse>;
 export type Customer = z.infer<typeof CustomerResponse>;

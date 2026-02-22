@@ -6,6 +6,7 @@ import { ApiError, uuid, now, type HonoEnv } from '../types';
 import {
   IdParam,
   ProductResponse,
+  ProductImageResponse,
   ProductListResponse,
   CreateProductBody,
   UpdateProductBody,
@@ -16,6 +17,15 @@ import {
   ErrorResponse,
   DeletedResponse,
 } from '../schemas';
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
 const VariantIdParam = z.object({
   id: z.string().uuid().openapi({ param: { name: 'id', in: 'path' } }),
@@ -69,6 +79,7 @@ app.openapi(listProducts, async (c) => {
 
   const productIds = products.map((p) => p.id);
   const variantsByProduct: Record<string, any[]> = {};
+  const imagesByProduct: Record<string, any[]> = {};
 
   if (productIds.length > 0) {
     const placeholders = productIds.map(() => '?').join(',');
@@ -83,13 +94,32 @@ app.openapi(listProducts, async (c) => {
       }
       variantsByProduct[v.product_id].push(v);
     }
+
+    const allImages = await db.query<any>(
+      `SELECT * FROM product_images WHERE product_id IN (${placeholders}) ORDER BY position ASC`,
+      productIds
+    );
+
+    for (const img of allImages) {
+      if (!imagesByProduct[img.product_id]) {
+        imagesByProduct[img.product_id] = [];
+      }
+      imagesByProduct[img.product_id].push(img);
+    }
   }
 
   const items = products.map((p) => ({
     id: p.id,
     title: p.title,
+    slug: p.slug || slugify(p.title),
     description: p.description,
+    image_url: p.image_url || null,
     status: p.status,
+    images: (imagesByProduct[p.id] || []).map((img) => ({
+      id: img.id,
+      image_url: img.image_url,
+      position: img.position,
+    })),
     created_at: p.created_at,
     variants: (variantsByProduct[p.id] || []).map((v) => ({
       id: v.id,
@@ -130,11 +160,23 @@ app.openapi(getProduct, async (c) => {
     [id]
   );
 
+  const images = await db.query<any>(
+    `SELECT * FROM product_images WHERE product_id = ? ORDER BY position ASC`,
+    [id]
+  );
+
   return c.json({
     id: product.id,
     title: product.title,
+    slug: product.slug || slugify(product.title),
     description: product.description,
+    image_url: product.image_url || null,
     status: product.status,
+    images: images.map((img) => ({
+      id: img.id,
+      image_url: img.image_url,
+      position: img.position,
+    })),
     created_at: product.created_at,
     variants: variants.map((v) => ({
       id: v.id,
@@ -161,19 +203,27 @@ const createProduct = createRoute({
 });
 
 app.openapi(createProduct, async (c) => {
-  const { title, description } = c.req.valid('json');
+  const { title, slug: requestedSlug, description, image_url } = c.req.valid('json');
   const db = getDb(c.var.db);
 
   const id = uuid();
   const timestamp = now();
 
+  let slug = requestedSlug || slugify(title);
+
+  // Ensure slug uniqueness
+  const [existing] = await db.query<any>(`SELECT id FROM products WHERE slug = ?`, [slug]);
+  if (existing) {
+    slug = `${slug}-${id.slice(0, 8)}`;
+  }
+
   await db.run(
-    `INSERT INTO products (id, title, description, status, created_at) VALUES (?, ?, ?, 'active', ?)`,
-    [id, title, description || null, timestamp]
+    `INSERT INTO products (id, title, slug, description, image_url, status, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+    [id, title, slug, description || null, image_url || null, timestamp]
   );
 
   return c.json(
-    { id, title, description: description || null, status: 'active' as const, created_at: timestamp, variants: [] },
+    { id, title, slug, description: description || null, image_url: image_url || null, status: 'active' as const, images: [], created_at: timestamp, variants: [] },
     201
   );
 });
@@ -210,9 +260,17 @@ app.openapi(updateProduct, async (c) => {
     updates.push('title = ?');
     params.push(body.title);
   }
+  if (body.slug !== undefined) {
+    updates.push('slug = ?');
+    params.push(body.slug);
+  }
   if (body.description !== undefined) {
     updates.push('description = ?');
     params.push(body.description);
+  }
+  if (body.image_url !== undefined) {
+    updates.push('image_url = ?');
+    params.push(body.image_url);
   }
   if (body.status !== undefined) {
     updates.push('status = ?');
@@ -226,12 +284,23 @@ app.openapi(updateProduct, async (c) => {
 
   const [product] = await db.query<any>(`SELECT * FROM products WHERE id = ?`, [id]);
   const variants = await db.query<any>(`SELECT * FROM variants WHERE product_id = ?`, [id]);
+  const images = await db.query<any>(
+    `SELECT * FROM product_images WHERE product_id = ? ORDER BY position ASC`,
+    [id]
+  );
 
   return c.json({
     id: product.id,
     title: product.title,
+    slug: product.slug || slugify(product.title),
     description: product.description,
+    image_url: product.image_url || null,
     status: product.status,
+    images: images.map((img) => ({
+      id: img.id,
+      image_url: img.image_url,
+      position: img.position,
+    })),
     created_at: product.created_at,
     variants: variants.map((v) => ({
       id: v.id,
@@ -284,6 +353,7 @@ app.openapi(deleteProduct, async (c) => {
     await db.run(`DELETE FROM inventory WHERE sku = ?`, [v.sku]);
   }
 
+  await db.run(`DELETE FROM product_images WHERE product_id = ?`, [id]);
   await db.run(`DELETE FROM variants WHERE product_id = ?`, [id]);
   await db.run(`DELETE FROM products WHERE id = ?`, [id]);
 
@@ -323,7 +393,7 @@ app.openapi(createVariant, async (c) => {
   const timestamp = now();
 
   await db.run(
-    `INSERT INTO variants (id, product_id, sku, title, price_cents, weight_g, image_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO variants (id, product_id, sku, title, price_cents, weight_grams, image_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, productId, sku, title, price_cents, 0, image_url || null, timestamp]
   );
 
@@ -439,6 +509,95 @@ app.openapi(deleteVariant, async (c) => {
 
   await db.run(`DELETE FROM inventory WHERE sku = ?`, [variant.sku]);
   await db.run(`DELETE FROM variants WHERE id = ?`, [variantId]);
+
+  return c.json({ deleted: true as const }, 200);
+});
+
+// ============================================================
+// PRODUCT IMAGE ROUTES
+// ============================================================
+
+const ImageIdParam = z.object({
+  id: z.string().uuid().openapi({ param: { name: 'id', in: 'path' } }),
+  imageId: z.string().uuid().openapi({ param: { name: 'imageId', in: 'path' } }),
+});
+
+const CreateProductImageBody = z.object({
+  image_url: z.string().url().openapi({ example: 'https://example.com/image.jpg' }),
+  position: z.number().int().min(0).optional().openapi({ example: 0 }),
+}).openapi('CreateProductImage');
+
+const addProductImage = createRoute({
+  method: 'post',
+  path: '/{id}/images',
+  tags: ['Products'],
+  summary: 'Add image to product',
+  security: [{ bearerAuth: [] }],
+  middleware: [adminOnly] as const,
+  request: {
+    params: IdParam,
+    body: { content: { 'application/json': { schema: CreateProductImageBody } } },
+  },
+  responses: {
+    201: { content: { 'application/json': { schema: ProductImageResponse } }, description: 'Image added' },
+    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Product not found' },
+  },
+});
+
+app.openapi(addProductImage, async (c) => {
+  const { id: productId } = c.req.valid('param');
+  const { image_url, position } = c.req.valid('json');
+  const db = getDb(c.var.db);
+
+  const [product] = await db.query<any>(`SELECT * FROM products WHERE id = ?`, [productId]);
+  if (!product) throw ApiError.notFound('Product not found');
+
+  const id = uuid();
+  const timestamp = now();
+
+  // If no position specified, put it at the end
+  let pos = position;
+  if (pos === undefined) {
+    const [maxPos] = await db.query<any>(
+      `SELECT COALESCE(MAX(position), -1) as max_pos FROM product_images WHERE product_id = ?`,
+      [productId]
+    );
+    pos = (maxPos?.max_pos ?? -1) + 1;
+  }
+
+  await db.run(
+    `INSERT INTO product_images (id, product_id, image_url, position, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [id, productId, image_url, pos, timestamp]
+  );
+
+  return c.json({ id, image_url, position: pos as number }, 201);
+});
+
+const deleteProductImage = createRoute({
+  method: 'delete',
+  path: '/{id}/images/{imageId}',
+  tags: ['Products'],
+  summary: 'Delete product image',
+  security: [{ bearerAuth: [] }],
+  middleware: [adminOnly] as const,
+  request: { params: ImageIdParam },
+  responses: {
+    200: { content: { 'application/json': { schema: DeletedResponse } }, description: 'Image deleted' },
+    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not found' },
+  },
+});
+
+app.openapi(deleteProductImage, async (c) => {
+  const { id: productId, imageId } = c.req.valid('param');
+  const db = getDb(c.var.db);
+
+  const [image] = await db.query<any>(
+    `SELECT * FROM product_images WHERE id = ? AND product_id = ?`,
+    [imageId, productId]
+  );
+  if (!image) throw ApiError.notFound('Product image not found');
+
+  await db.run(`DELETE FROM product_images WHERE id = ?`, [imageId]);
 
   return c.json({ deleted: true as const }, 200);
 });

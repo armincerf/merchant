@@ -17,7 +17,8 @@ export type WSEventType =
   | 'order.shipped'
   | 'order.refunded'
   | 'inventory.updated'
-  | 'inventory.low';
+  | 'inventory.low'
+  | 'presence.count';
 
 export interface WSEvent {
   type: WSEventType;
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE TABLE IF NOT EXISTS products (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
+  slug TEXT UNIQUE,
   description TEXT DEFAULT '',
   image_url TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'draft')),
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS product_images (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_product_images_product ON product_images(product_id);
+CREATE INDEX IF NOT EXISTS idx_products_slug ON products(slug);
 
 CREATE TABLE IF NOT EXISTS variants (
   id TEXT PRIMARY KEY,
@@ -420,6 +423,28 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     return { changes: result.changes };
   }
 
+  private broadcastPresenceCount(productId: string): void {
+    const topic = `presence.product.${productId}`;
+    let count = 0;
+    for (const [, session] of this.sessions) {
+      if (session.topics.has(topic)) count++;
+    }
+    const message = JSON.stringify({
+      type: 'presence.count',
+      data: { product_id: productId, count },
+      timestamp: new Date().toISOString(),
+    });
+    for (const [ws, session] of this.sessions) {
+      if (session.topics.has(topic)) {
+        try {
+          ws.send(message);
+        } catch {
+          this.sessions.delete(ws);
+        }
+      }
+    }
+  }
+
   private handleWebSocketUpgrade(request: Request): Response {
     const url = new URL(request.url);
     const topics = url.searchParams.get('topics')?.split(',') || ['*'];
@@ -429,6 +454,11 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
 
     this.ctx.acceptWebSocket(server);
     this.sessions.set(server, { topics: new Set(topics) });
+
+    for (const topic of topics) {
+      const match = topic.match(/^presence\.product\.(.+)$/);
+      if (match) this.broadcastPresenceCount(match[1]);
+    }
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -441,18 +471,38 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
 
       if (data.action === 'subscribe' && data.topic) {
         session.topics.add(data.topic);
+        const match = data.topic.match(/^presence\.product\.(.+)$/);
+        if (match) this.broadcastPresenceCount(match[1]);
       } else if (data.action === 'unsubscribe' && data.topic) {
         session.topics.delete(data.topic);
+        const match = data.topic.match(/^presence\.product\.(.+)$/);
+        if (match) this.broadcastPresenceCount(match[1]);
       }
     } catch {}
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
+    const session = this.sessions.get(ws);
+    const presenceTopics = session
+      ? [...session.topics].filter((t) => t.startsWith('presence.product.'))
+      : [];
     this.sessions.delete(ws);
+    for (const topic of presenceTopics) {
+      const match = topic.match(/^presence\.product\.(.+)$/);
+      if (match) this.broadcastPresenceCount(match[1]);
+    }
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
+    const session = this.sessions.get(ws);
+    const presenceTopics = session
+      ? [...session.topics].filter((t) => t.startsWith('presence.product.'))
+      : [];
     this.sessions.delete(ws);
+    for (const topic of presenceTopics) {
+      const match = topic.match(/^presence\.product\.(.+)$/);
+      if (match) this.broadcastPresenceCount(match[1]);
+    }
   }
 
   broadcast(event: WSEvent): void {
@@ -491,11 +541,25 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     );
 
     for (const item of reservedItems) {
-      this.run(`UPDATE inventory SET reserved = reserved - ? WHERE sku = ?`, [item.qty, item.sku]);
+      this.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [item.qty, item.sku]);
     }
 
     this.run(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
     this.run(`DELETE FROM cart_items WHERE cart_id IN (${placeholders})`, cartIds);
+
+    // Broadcast inventory updates for each affected SKU
+    for (const item of reservedItems) {
+      const [inv] = this.query<{ on_hand: number; reserved: number }>(
+        `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
+        [item.sku]
+      );
+      const available = inv ? Math.max(0, inv.on_hand - inv.reserved) : 0;
+      this.broadcast({
+        type: 'inventory.updated',
+        data: { sku: item.sku, available },
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     return expiredCarts.length;
   }

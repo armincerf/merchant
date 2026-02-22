@@ -1,4 +1,5 @@
 import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
+import { z } from '@hono/zod-openapi';
 import { getDb } from '../db';
 import { authMiddleware, adminOnly } from '../middleware/auth';
 import { ApiError, uuid, now, type HonoEnv } from '../types';
@@ -9,10 +10,58 @@ import {
   InventoryItem,
   SkuParam,
   AdjustInventoryBody,
+  AvailabilityResponse,
   ErrorResponse,
 } from '../schemas';
 
 const app = new OpenAPIHono<HonoEnv>();
+
+// Public endpoint — no auth required
+const getAvailability = createRoute({
+  method: 'get',
+  path: '/available',
+  tags: ['Inventory'],
+  summary: 'Get available stock for SKUs (public)',
+  description: 'Returns available quantity (on_hand - reserved) for the given SKUs. No authentication required.',
+  request: {
+    query: z.object({
+      skus: z.string().openapi({ param: { name: 'skus', in: 'query' }, example: 'SKU1,SKU2' }),
+    }),
+  },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: AvailabilityResponse } },
+      description: 'Available stock for requested SKUs',
+    },
+  },
+});
+
+app.openapi(getAvailability, async (c) => {
+  const { skus: skusParam } = c.req.valid('query');
+  const db = getDb(c.var.db);
+
+  const skuList = skusParam.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+  if (skuList.length === 0) {
+    return c.json({ items: [] }, 200);
+  }
+
+  const placeholders = skuList.map(() => '?').join(',');
+  const rows = await db.query<any>(
+    `SELECT sku, on_hand, reserved FROM inventory WHERE sku IN (${placeholders})`,
+    skuList
+  );
+
+  const rowMap = new Map(rows.map((r) => [r.sku, r]));
+  const items = skuList.map((sku) => {
+    const row = rowMap.get(sku);
+    return {
+      sku,
+      available: row ? Math.max(0, row.on_hand - row.reserved) : 0,
+    };
+  });
+
+  return c.json({ items }, 200);
+});
 
 app.use('*', authMiddleware);
 
@@ -175,6 +224,13 @@ app.openapi(adjustInventory, async (c) => {
   const available = level.on_hand - level.reserved;
 
   await checkLowInventory(c.var.db, c.executionCtx, sku, available);
+
+  // Broadcast inventory update for live stock display
+  c.var.db.broadcast({
+    type: 'inventory.updated',
+    data: { sku, available },
+    timestamp: new Date().toISOString(),
+  });
 
   return c.json({
     sku: level.sku,

@@ -86,7 +86,14 @@ app.doc('/openapi.json', {
 app.get('/docs', swaggerUI({ url: '/openapi.json' }));
 
 export default {
-  fetch: app.fetch,
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    if (request.headers.get('Upgrade') === 'websocket') {
+      const id = env.MERCHANT.idFromName('default');
+      const stub = env.MERCHANT.get(id);
+      return stub.fetch(request);
+    }
+    return app.fetch(request, env, ctx);
+  },
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const id = env.MERCHANT.idFromName('default');
     const stub = env.MERCHANT.get(id);

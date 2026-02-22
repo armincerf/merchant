@@ -1,6 +1,6 @@
 -- ============================================================
 -- PERFORMANCE OPTIMIZATIONS FOR MERCHANT DATABASE
--- Run this after schema-d1.sql to add missing indexes
+-- Additional performance indexes
 -- ============================================================
 
 -- Additional indexes for better query performance

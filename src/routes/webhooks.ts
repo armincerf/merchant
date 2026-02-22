@@ -285,7 +285,7 @@ webhooks.post('/stripe', async (c) => {
           );
 
           await db.run(
-            `UPDATE inventory SET reserved = reserved - ?, on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`,
+            `UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`,
             [item.qty, item.qty, now(), item.sku]
           );
 
@@ -293,6 +293,15 @@ webhooks.post('/stripe', async (c) => {
             `INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, 'sale')`,
             [uuid(), item.sku, -item.qty]
           );
+
+          // Broadcast inventory update after sale
+          const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [item.sku]);
+          const available = inv ? Math.max(0, inv.on_hand - inv.reserved) : 0;
+          c.var.db.broadcast({
+            type: 'inventory.updated',
+            data: { sku: item.sku, available },
+            timestamp: new Date().toISOString(),
+          });
         }
 
         // Update cart status to prevent cron from treating it as abandoned checkout
