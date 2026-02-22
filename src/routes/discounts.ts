@@ -5,6 +5,7 @@ import { authMiddleware, adminOnly } from '../middleware/auth';
 import { ApiError, uuid, now, type HonoEnv } from '../types';
 import {
   IdParam,
+  PaginationQuery,
   DiscountResponse,
   DiscountListResponse,
   CreateDiscountBody,
@@ -192,6 +193,7 @@ const listDiscounts = createRoute({
   summary: 'List all discounts',
   security: [{ bearerAuth: [] }],
   middleware: [adminOnly] as const,
+  request: { query: PaginationQuery },
   responses: {
     200: { content: { 'application/json': { schema: DiscountListResponse } }, description: 'List of discounts' },
   },
@@ -199,26 +201,43 @@ const listDiscounts = createRoute({
 
 app.openapi(listDiscounts, async (c) => {
   const db = getDb(c.var.db);
+  const { limit: limitStr, cursor } = c.req.valid('query');
+  const limit = Math.min(parseInt(limitStr || '100'), 250);
 
-  const discounts = await db.query<any>(`SELECT * FROM discounts ORDER BY created_at DESC`, []);
+  let query = `SELECT * FROM discounts`;
+  const params: unknown[] = [];
 
-  return c.json({
-    items: discounts.map((d) => ({
-      id: d.id,
-      code: d.code,
-      type: d.type,
-      value: d.value,
-      status: d.status,
-      min_purchase_cents: d.min_purchase_cents,
-      max_discount_cents: d.max_discount_cents,
-      starts_at: d.starts_at,
-      expires_at: d.expires_at,
-      usage_limit: d.usage_limit,
-      usage_limit_per_customer: d.usage_limit_per_customer,
-      usage_count: d.usage_count,
-      created_at: d.created_at,
-    })),
-  }, 200);
+  if (cursor) {
+    query += ` WHERE created_at < ?`;
+    params.push(cursor);
+  }
+
+  query += ` ORDER BY created_at DESC LIMIT ?`;
+  params.push(limit + 1);
+
+  const discounts = await db.query<any>(query, params);
+  const hasMore = discounts.length > limit;
+  if (hasMore) discounts.pop();
+
+  const items = discounts.map((d) => ({
+    id: d.id,
+    code: d.code,
+    type: d.type,
+    value: d.value,
+    status: d.status,
+    min_purchase_cents: d.min_purchase_cents,
+    max_discount_cents: d.max_discount_cents,
+    starts_at: d.starts_at,
+    expires_at: d.expires_at,
+    usage_limit: d.usage_limit,
+    usage_limit_per_customer: d.usage_limit_per_customer,
+    usage_count: d.usage_count,
+    created_at: d.created_at,
+  }));
+
+  const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].created_at : null;
+
+  return c.json({ items, pagination: { has_more: hasMore, next_cursor: nextCursor } }, 200);
 });
 
 const getDiscount = createRoute({

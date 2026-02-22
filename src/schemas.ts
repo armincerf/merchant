@@ -441,6 +441,7 @@ export const DiscountResponse = z.object({
 
 export const DiscountListResponse = z.object({
   items: z.array(DiscountResponse),
+  pagination: PaginationResponse,
 }).openapi('DiscountList');
 
 export const CreateDiscountBody = z.object({

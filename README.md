@@ -483,13 +483,6 @@ npx tsx scripts/migrate-d1-to-do.ts import --file=d1-export-xxx.json --url=https
 
 The migration imports products, variants, inventory, and discounts. Orders are exported for reference but not re-imported (they're historical records). API keys and OAuth tokens must be regenerated.
 
-## Scaling
-
-For most stores, a single Durable Object handles everything. If you outgrow it:
-
-1. **Postgres migration**: Use `schema-postgres.sql` for a traditional DB setup
-2. **Multi-DO sharding**: Split by entity type (carts, orders, inventory)
-
 ## License
 
 MIT
