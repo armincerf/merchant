@@ -1,4 +1,4 @@
-import { ReactNode, useEffect } from 'react';
+import { ReactNode, useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -17,19 +17,21 @@ const sizes = {
 };
 
 export function Modal({ open, onClose, title, children, size = 'md' }: ModalProps) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
+    if (!open) return;
     const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
-    if (open) {
-      document.addEventListener('keydown', handleEsc);
-      document.body.style.overflow = 'hidden';
-    }
+    document.addEventListener('keydown', handleEsc);
+    document.body.style.overflow = 'hidden';
     return () => {
       document.removeEventListener('keydown', handleEsc);
       document.body.style.overflow = '';
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 

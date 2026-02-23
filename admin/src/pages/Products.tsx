@@ -69,6 +69,9 @@ export function Products() {
       setNewDescription('');
       setSelectedProduct(product);
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   // Create variant mutation
@@ -86,6 +89,9 @@ export function Products() {
       resetVariantForm();
       setVariantMode(null);
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   // Update product mutation
@@ -95,6 +101,9 @@ export function Products() {
     onSuccess: (updated) => {
       queryClient.invalidateQueries({ queryKey: ['products'] });
       setSelectedProduct(updated);
+    },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
     },
   });
 
@@ -115,6 +124,9 @@ export function Products() {
       resetVariantForm();
       setVariantMode(null);
       setEditingVariant(null);
+    },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
     },
   });
 

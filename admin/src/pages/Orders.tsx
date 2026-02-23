@@ -59,6 +59,9 @@ export function Orders() {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
       setSelectedOrder(updated);
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   // Refund mutation
@@ -67,6 +70,9 @@ export function Orders() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
       setSelectedOrder(null);
+    },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
     },
   });
 
@@ -355,8 +361,8 @@ export function Orders() {
                     Items
                   </h4>
                   <div className="space-y-2">
-                    {selectedOrder.items.map((item, i) => (
-                      <div key={i} className="flex items-center justify-between text-sm">
+                    {selectedOrder.items.map((item) => (
+                      <div key={item.sku} className="flex items-center justify-between text-sm">
                         <div>
                           <p className="font-mono">{item.title}</p>
                           <p className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
@@ -463,18 +469,26 @@ export function Orders() {
                     color: 'var(--text)',
                   }}
                 />
-                {selectedOrder.tracking?.url && (
-                  <a
-                    href={selectedOrder.tracking.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-sm mt-2 hover:underline"
-                    style={{ color: 'var(--accent)' }}
-                  >
-                    <ExternalLink size={14} />
-                    Track package
-                  </a>
-                )}
+                {selectedOrder.tracking?.url && (() => {
+                  try {
+                    const url = new URL(selectedOrder.tracking.url);
+                    if (url.protocol === 'https:' || url.protocol === 'http:') {
+                      return (
+                        <a
+                          href={selectedOrder.tracking.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-sm mt-2 hover:underline"
+                          style={{ color: 'var(--accent)' }}
+                        >
+                          <ExternalLink size={14} />
+                          Track package
+                        </a>
+                      );
+                    }
+                    return null;
+                  } catch { return null; }
+                })()}
               </div>
             </div>
 

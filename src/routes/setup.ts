@@ -32,6 +32,14 @@ const initKeys = createRoute({
 });
 
 app.openapi(initKeys, async (c) => {
+  const bootstrapSecret = c.env.BOOTSTRAP_SECRET;
+  if (bootstrapSecret) {
+    const provided = c.req.query('bootstrap_secret') ?? c.req.header('X-Bootstrap-Secret');
+    if (provided !== bootstrapSecret) {
+      throw ApiError.unauthorized('Invalid or missing bootstrap secret');
+    }
+  }
+
   const { keys } = c.req.valid('json');
   const db = getDb(c.var.db);
 

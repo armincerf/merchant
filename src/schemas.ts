@@ -436,7 +436,7 @@ export const DiscountResponse = z.object({
   usage_limit_per_customer: z.number().int().nullable(),
   usage_count: z.number().int(),
   created_at: z.string().datetime(),
-  updated_at: z.string().datetime().optional(),
+  updated_at: z.string().datetime(),
 }).openapi('Discount');
 
 export const DiscountListResponse = z.object({

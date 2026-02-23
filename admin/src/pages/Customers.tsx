@@ -61,6 +61,9 @@ export function Customers() {
       queryClient.invalidateQueries({ queryKey: ['customers'] });
       queryClient.invalidateQueries({ queryKey: ['customer', selectedCustomer?.id] });
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   const customers = data?.items || [];

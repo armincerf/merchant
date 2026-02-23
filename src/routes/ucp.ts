@@ -792,8 +792,8 @@ export async function handleUCPStripeWebhook(
   
   // Insert order
   await db.run(
-    `INSERT INTO orders (id, number, status, customer_email, subtotal_cents, tax_cents, shipping_cents, total_cents, currency, stripe_session_id, items, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO orders (id, number, status, customer_email, subtotal_cents, tax_cents, shipping_cents, total_cents, currency, stripe_checkout_session_id, stripe_payment_intent_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       orderId,
       orderNumber,
@@ -805,16 +805,17 @@ export async function handleUCPStripeWebhook(
       grandTotal,
       session.currency,
       stripeSessionId,
-      JSON.stringify(lineItems.map((li: UCPLineItem) => ({
-        sku: li.item.id,
-        title: li.item.title,
-        qty: li.quantity,
-        unit_price_cents: li.unit_price.amount,
-      }))),
-      now(),
-      now(),
+      stripeSession.payment_intent,
     ]
   );
+
+  // Insert order items
+  for (const li of lineItems) {
+    await db.run(
+      `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuid(), orderId, li.item.id, li.item.title || li.item.id, li.quantity, li.unit_price.amount]
+    );
+  }
   
   // Update UCP session
   await db.run(
@@ -825,8 +826,13 @@ export async function handleUCPStripeWebhook(
   // Deduct inventory
   for (const item of lineItems) {
     await db.run(
-      `UPDATE inventory SET on_hand = on_hand - ?, reserved = reserved - ? WHERE sku = ?`,
-      [item.quantity, item.quantity, item.item.id]
+      `UPDATE inventory SET on_hand = on_hand - ?, reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+      [item.quantity, item.quantity, now(), item.item.id]
+    );
+
+    await db.run(
+      `INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, 'sale')`,
+      [uuid(), item.item.id, -item.quantity]
     );
   }
 }

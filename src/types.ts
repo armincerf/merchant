@@ -7,6 +7,7 @@ export type Env = {
   STORE_NAME?: string;
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  BOOTSTRAP_SECRET?: string;
 };
 
 export type DOStub = {
@@ -88,9 +89,11 @@ export function generateOrderNumber(): string {
   const now = new Date();
   const datePart = now.toISOString().slice(2, 10).replace(/-/g, '');
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
   let suffix = '';
-  for (let i = 0; i < 4; i++) {
-    suffix += chars.charAt(Math.floor(Math.random() * chars.length));
+  for (let i = 0; i < 6; i++) {
+    suffix += chars.charAt(bytes[i] % chars.length);
   }
   return `ORD-${datePart}-${suffix}`;
 }

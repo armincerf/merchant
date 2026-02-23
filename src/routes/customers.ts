@@ -91,22 +91,25 @@ app.openapi(listCustomers, async (c) => {
   }
 
   if (cursor) {
-    query += ` AND created_at < ?`;
-    params.push(cursor);
+    const [cursorDate, cursorId] = cursor.split('|');
+    query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`;
+    params.push(cursorDate, cursorDate, cursorId);
   }
 
-  query += ` ORDER BY created_at DESC LIMIT ?`;
+  query += ` ORDER BY created_at DESC, id DESC LIMIT ?`;
   params.push(limit + 1);
 
   const rows = await db.query<any>(query, params);
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, -1) : rows;
 
+  const lastItem = items.length > 0 ? items[items.length - 1] : null;
+
   return c.json({
     items: items.map(formatCustomer),
     pagination: {
       has_more: hasMore,
-      next_cursor: hasMore ? items[items.length - 1].created_at : null,
+      next_cursor: hasMore && lastItem ? `${lastItem.created_at}|${lastItem.id}` : null,
     },
   }, 200);
 });
@@ -174,11 +177,12 @@ app.openapi(getCustomerOrders, async (c) => {
   const params: any[] = [id];
 
   if (cursor) {
-    query += ` AND created_at < ?`;
-    params.push(cursor);
+    const [cursorDate, cursorId] = cursor.split('|');
+    query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`;
+    params.push(cursorDate, cursorDate, cursorId);
   }
 
-  query += ` ORDER BY created_at DESC LIMIT ?`;
+  query += ` ORDER BY created_at DESC, id DESC LIMIT ?`;
   params.push(limit + 1);
 
   const rows = await db.query<any>(query, params);
@@ -208,11 +212,13 @@ app.openapi(getCustomerOrders, async (c) => {
     items: itemsByOrder[order.id] || [],
   }));
 
+  const lastItem = items.length > 0 ? items[items.length - 1] : null;
+
   return c.json({
     items: ordersWithItems.map(formatOrder),
     pagination: {
       has_more: hasMore,
-      next_cursor: hasMore ? items[items.length - 1].created_at : null,
+      next_cursor: hasMore && lastItem ? `${lastItem.created_at}|${lastItem.id}` : null,
     },
   }, 200);
 });

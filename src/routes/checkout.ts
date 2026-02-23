@@ -139,15 +139,12 @@ app.openapi(addCartItems, async (c) => {
   if (!cart) throw ApiError.notFound('Cart not found');
   if (cart.status !== 'open') throw ApiError.conflict('Cart is not open');
 
+  // Validate all items before any mutations
   const validatedItems = [];
   for (const { sku, qty } of items) {
     const [variant] = await db.query<any>(`SELECT * FROM variants WHERE sku = ?`, [sku]);
     if (!variant) throw ApiError.notFound(`SKU not found: ${sku}`);
     if (variant.status !== 'active') throw ApiError.invalidRequest(`SKU not active: ${sku}`);
-
-    const [inv] = await db.query<any>(`SELECT * FROM inventory WHERE sku = ?`, [sku]);
-    const available = (inv?.on_hand ?? 0) - (inv?.reserved ?? 0);
-    if (available < qty) throw ApiError.insufficientInventory(sku);
 
     validatedItems.push({
       sku,
@@ -157,13 +154,56 @@ app.openapi(addCartItems, async (c) => {
     });
   }
 
+  // Release inventory reservations for existing cart items before replacing
+  const oldCartItems = await db.query<any>(`SELECT sku, qty FROM cart_items WHERE cart_id = ?`, [cartId]);
+  for (const oldItem of oldCartItems) {
+    await db.run(
+      `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+      [oldItem.qty, now(), oldItem.sku]
+    );
+  }
+
   await db.run(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
 
+  // Reserve inventory atomically for each new item and insert cart items
   for (const item of validatedItems) {
+    const result = await db.run(
+      `UPDATE inventory SET reserved = reserved + ?, updated_at = ? WHERE sku = ? AND on_hand - reserved >= ?`,
+      [item.qty, now(), item.sku, item.qty]
+    );
+    if (result.changes === 0) {
+      // Reservation failed — release any reservations made so far in this loop
+      // by querying what we've already inserted into cart_items
+      const insertedItems = await db.query<any>(`SELECT sku, qty FROM cart_items WHERE cart_id = ?`, [cartId]);
+      for (const inserted of insertedItems) {
+        await db.run(
+          `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+          [inserted.qty, now(), inserted.sku]
+        );
+      }
+      await db.run(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
+      throw ApiError.insufficientInventory(item.sku);
+    }
+
     await db.run(
       `INSERT INTO cart_items (id, cart_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
       [uuid(), cartId, item.sku, item.title, item.qty, item.unit_price_cents]
     );
+  }
+
+  // Broadcast inventory updates for all affected SKUs (old released + new reserved)
+  const affectedSkuSet = new Set<string>();
+  oldCartItems.forEach((i) => affectedSkuSet.add(i.sku));
+  validatedItems.forEach((i) => affectedSkuSet.add(i.sku));
+  const affectedSkus = Array.from(affectedSkuSet);
+  for (const sku of affectedSkus) {
+    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [sku]);
+    const available = inv ? inv.on_hand - inv.reserved : 0;
+    c.var.db.broadcast({
+      type: 'inventory.updated',
+      data: { sku, available },
+      timestamp: new Date().toISOString(),
+    });
   }
 
   const allCartItems = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
@@ -466,6 +506,11 @@ app.openapi(checkoutCart, async (c) => {
 
       const currentTime = now();
 
+      // NOTE: Per-customer usage check has a TOCTOU race condition. Two concurrent
+      // checkouts for the same customer can both pass this check before either inserts
+      // into discount_usage (which happens later in the webhook handler). A proper fix
+      // requires adding a UNIQUE(discount_id, customer_email) constraint on discount_usage
+      // so the INSERT in the webhook handler fails for the second checkout.
       if (discount.usage_limit_per_customer !== null) {
         const [usage] = await db.query<any>(
           `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,

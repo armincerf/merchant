@@ -146,11 +146,7 @@ oauth.get('/authorize', async (c) => {
   
   const allowedUris = JSON.parse(client.redirect_uris || '[]');
   if (!allowedUris.includes(redirectUri)) {
-    allowedUris.push(redirectUri);
-    await db.run(
-      `UPDATE oauth_clients SET redirect_uris = ? WHERE client_id = ?`,
-      [JSON.stringify(allowedUris), clientId]
-    );
+    throw ApiError.invalidRequest('redirect_uri not registered for this client');
   }
   
   const authId = uuid();
@@ -202,7 +198,13 @@ oauth.post('/authorize', async (c) => {
   // For now, link is shown in UI for development/testing
   console.log(`[OAuth] Magic link for ${email}: ${magicLink}`);
   
-  const html = generateMagicLinkSentPage(email, magicLink);
+  // TODO: Set showDevLink to false once a real email service is configured.
+  // In production, the magic link must NEVER be rendered in HTML.
+  const showDevLink = true;
+  if (showDevLink) {
+    console.warn('[OAuth] WARNING: Dev magic link is being shown in HTML response. Do NOT use in production.');
+  }
+  const html = generateMagicLinkSentPage(email, magicLink, showDevLink);
   return c.html(html);
 });
 
@@ -455,7 +457,15 @@ function generateLoginPage(authId: string, clientId: string, scope: string, stor
 </html>`;
 }
 
-function generateMagicLinkSentPage(email: string, magicLink: string): string {
+function generateMagicLinkSentPage(email: string, magicLink: string, showDevLink = true): string {
+  const devLinkHtml = showDevLink
+    ? `
+    <div class="dev-link">
+      <p class="dev-label">⚠️ DEV MODE - No email service configured</p>
+      <a href="${magicLink}">Click here to verify (dev only)</a>
+    </div>`
+    : '';
+
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -481,11 +491,7 @@ function generateMagicLinkSentPage(email: string, magicLink: string): string {
     <h1>Check Your Email</h1>
     <p class="subtitle">We sent a verification link to<br><span class="email">${email}</span></p>
     <p style="color: #666; font-size: 14px;">Click the link in the email to continue</p>
-    
-    <div class="dev-link">
-      <p class="dev-label">⚠️ DEV MODE - No email service configured</p>
-      <a href="${magicLink}">Click here to verify (dev only)</a>
-    </div>
+    ${devLinkHtml}
   </div>
 </body>
 </html>`;

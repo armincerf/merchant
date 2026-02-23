@@ -54,11 +54,12 @@ app.openapi(listOrders, async (c) => {
   }
 
   if (cursor) {
-    query += ` AND created_at < ?`;
-    params.push(cursor);
+    const [cursorDate, cursorId] = cursor.split('|');
+    query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`;
+    params.push(cursorDate, cursorDate, cursorId);
   }
 
-  query += ` ORDER BY created_at DESC LIMIT ?`;
+  query += ` ORDER BY created_at DESC, id DESC LIMIT ?`;
   params.push(limit + 1);
 
   const orderList = await db.query<any>(query, params);
@@ -85,7 +86,8 @@ app.openapi(listOrders, async (c) => {
   }
 
   const items = orderList.map((order) => formatOrder(order, itemsByOrder[order.id] || []));
-  const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].created_at : null;
+  const lastItem = orderList.length > 0 ? orderList[orderList.length - 1] : null;
+  const nextCursor = hasMore && lastItem ? `${lastItem.created_at}|${lastItem.id}` : null;
 
   return c.json({ items, pagination: { has_more: hasMore, next_cursor: nextCursor } }, 200);
 });
@@ -407,7 +409,8 @@ app.openapi(createTestOrder, async (c) => {
       [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents]
     );
 
-    await db.run(`UPDATE inventory SET on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`, [
+    await db.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`, [
+      item.qty,
       item.qty,
       timestamp,
       item.sku,

@@ -21,7 +21,8 @@
 
   "r2_buckets": [
     {
-      "binding": "IMAGES"
+      "binding": "IMAGES",
+      "bucket_name": "merchant-images"
     }
   ],
 

@@ -208,11 +208,12 @@ app.openapi(listDiscounts, async (c) => {
   const params: unknown[] = [];
 
   if (cursor) {
-    query += ` WHERE created_at < ?`;
-    params.push(cursor);
+    const [cursorDate, cursorId] = cursor.split('|');
+    query += ` WHERE (created_at < ? OR (created_at = ? AND id < ?))`;
+    params.push(cursorDate, cursorDate, cursorId);
   }
 
-  query += ` ORDER BY created_at DESC LIMIT ?`;
+  query += ` ORDER BY created_at DESC, id DESC LIMIT ?`;
   params.push(limit + 1);
 
   const discounts = await db.query<any>(query, params);
@@ -233,9 +234,11 @@ app.openapi(listDiscounts, async (c) => {
     usage_limit_per_customer: d.usage_limit_per_customer,
     usage_count: d.usage_count,
     created_at: d.created_at,
+    updated_at: d.updated_at,
   }));
 
-  const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].created_at : null;
+  const lastDiscount = discounts.length > 0 ? discounts[discounts.length - 1] : null;
+  const nextCursor = hasMore && lastDiscount ? `${lastDiscount.created_at}|${lastDiscount.id}` : null;
 
   return c.json({ items, pagination: { has_more: hasMore, next_cursor: nextCursor } }, 200);
 });
@@ -387,6 +390,7 @@ app.openapi(createDiscount, async (c) => {
     usage_limit_per_customer: discount.usage_limit_per_customer,
     usage_count: discount.usage_count,
     created_at: discount.created_at,
+    updated_at: discount.updated_at,
   }, 201);
 });
 

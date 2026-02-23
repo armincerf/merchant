@@ -65,6 +65,9 @@ export function Webhooks() {
       setNewEvents(['order.created']);
       setNewSecret(result.secret);
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   const updateMutation = useMutation({
@@ -74,6 +77,9 @@ export function Webhooks() {
       queryClient.invalidateQueries({ queryKey: ['webhooks'] });
       queryClient.invalidateQueries({ queryKey: ['webhook', selectedWebhook] });
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   const deleteMutation = useMutation({
@@ -82,12 +88,18 @@ export function Webhooks() {
       queryClient.invalidateQueries({ queryKey: ['webhooks'] });
       setSelectedWebhook(null);
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   const rotateSecretMutation = useMutation({
     mutationFn: (id: string) => api.rotateWebhookSecret(id),
     onSuccess: (result) => {
       setNewSecret(result.secret);
+    },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
     },
   });
 
@@ -98,9 +110,13 @@ export function Webhooks() {
   };
 
   const copySecret = async (secret: string) => {
-    await navigator.clipboard.writeText(secret);
-    setCopiedSecret(true);
-    setTimeout(() => setCopiedSecret(false), 2000);
+    try {
+      await navigator.clipboard.writeText(secret);
+      setCopiedSecret(true);
+      setTimeout(() => setCopiedSecret(false), 2000);
+    } catch {
+      prompt('Could not copy automatically. Copy the secret below:', secret);
+    }
   };
 
   const toggleEvent = (event: string) => {

@@ -27,6 +27,7 @@ export interface WSEvent {
 }
 
 const SCHEMA = `
+-- Tables with no FK dependencies
 CREATE TABLE IF NOT EXISTS api_keys (
   id TEXT PRIMARY KEY,
   key_hash TEXT NOT NULL UNIQUE,
@@ -34,7 +35,25 @@ CREATE TABLE IF NOT EXISTS api_keys (
   role TEXT NOT NULL CHECK (role IN ('public', 'admin')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
 
+CREATE TABLE IF NOT EXISTS config (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  stripe_event_id TEXT UNIQUE,
+  type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_events_stripe_event_id ON events(stripe_event_id);
+CREATE INDEX IF NOT EXISTS idx_events_type_processed ON events(type, processed_at);
+
+-- Products, images, variants
 CREATE TABLE IF NOT EXISTS products (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -44,6 +63,8 @@ CREATE TABLE IF NOT EXISTS products (
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'draft')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_products_slug ON products(slug);
+CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
 
 CREATE TABLE IF NOT EXISTS product_images (
   id TEXT PRIMARY KEY,
@@ -53,11 +74,10 @@ CREATE TABLE IF NOT EXISTS product_images (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_product_images_product ON product_images(product_id);
-CREATE INDEX IF NOT EXISTS idx_products_slug ON products(slug);
 
 CREATE TABLE IF NOT EXISTS variants (
   id TEXT PRIMARY KEY,
-  product_id TEXT NOT NULL REFERENCES products(id),
+  product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   sku TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL,
   price_cents INTEGER NOT NULL,
@@ -68,7 +88,11 @@ CREATE TABLE IF NOT EXISTS variants (
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'draft')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_variants_sku ON variants(sku);
+CREATE INDEX IF NOT EXISTS idx_variants_product ON variants(product_id);
+CREATE INDEX IF NOT EXISTS idx_variants_status ON variants(status);
 
+-- Inventory
 CREATE TABLE IF NOT EXISTS inventory (
   id TEXT PRIMARY KEY,
   sku TEXT NOT NULL UNIQUE,
@@ -76,6 +100,7 @@ CREATE TABLE IF NOT EXISTS inventory (
   reserved INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_inventory_sku ON inventory(sku);
 
 CREATE TABLE IF NOT EXISTS inventory_logs (
   id TEXT PRIMARY KEY,
@@ -84,7 +109,73 @@ CREATE TABLE IF NOT EXISTS inventory_logs (
   reason TEXT NOT NULL CHECK (reason IN ('restock', 'correction', 'damaged', 'return', 'sale', 'release')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_inventory_logs_sku_created ON inventory_logs(sku, created_at);
 
+-- Discounts (referenced by carts, orders, discount_usage)
+CREATE TABLE IF NOT EXISTS discounts (
+  id TEXT PRIMARY KEY,
+  code TEXT UNIQUE,
+  type TEXT NOT NULL CHECK (type IN ('percentage', 'fixed_amount')),
+  value INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+  min_purchase_cents INTEGER DEFAULT 0,
+  max_discount_cents INTEGER,
+  starts_at TEXT,
+  expires_at TEXT,
+  usage_limit INTEGER,
+  usage_limit_per_customer INTEGER DEFAULT 1,
+  usage_count INTEGER NOT NULL DEFAULT 0,
+  stripe_coupon_id TEXT,
+  stripe_promotion_code_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_discounts_code ON discounts(code);
+CREATE INDEX IF NOT EXISTS idx_discounts_status ON discounts(status);
+
+-- Customers (referenced by orders, oauth_tokens)
+CREATE TABLE IF NOT EXISTS customers (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  name TEXT,
+  phone TEXT,
+  password_hash TEXT,
+  email_verified_at TEXT,
+  auth_provider TEXT,
+  auth_provider_id TEXT,
+  accepts_marketing INTEGER DEFAULT 0,
+  locale TEXT DEFAULT 'en',
+  metadata TEXT,
+  order_count INTEGER DEFAULT 0,
+  total_spent_cents INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_order_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email);
+CREATE INDEX IF NOT EXISTS idx_customers_last_order ON customers(last_order_at);
+CREATE INDEX IF NOT EXISTS idx_customers_created_at ON customers(created_at);
+
+CREATE TABLE IF NOT EXISTS customer_addresses (
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  label TEXT,
+  is_default INTEGER DEFAULT 0,
+  name TEXT,
+  company TEXT,
+  line1 TEXT NOT NULL,
+  line2 TEXT,
+  city TEXT NOT NULL,
+  state TEXT,
+  postal_code TEXT NOT NULL,
+  country TEXT NOT NULL DEFAULT 'US',
+  phone TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_customer_addresses_customer ON customer_addresses(customer_id);
+
+-- Carts (references discounts)
 CREATE TABLE IF NOT EXISTS carts (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'checked_out', 'expired')),
@@ -98,6 +189,8 @@ CREATE TABLE IF NOT EXISTS carts (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_carts_expires ON carts(expires_at);
+CREATE INDEX IF NOT EXISTS idx_carts_status ON carts(status);
 
 CREATE TABLE IF NOT EXISTS cart_items (
   id TEXT PRIMARY KEY,
@@ -107,7 +200,9 @@ CREATE TABLE IF NOT EXISTS cart_items (
   qty INTEGER NOT NULL,
   unit_price_cents INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_cart_items_cart_id ON cart_items(cart_id);
 
+-- Orders (references customers, discounts)
 CREATE TABLE IF NOT EXISTS orders (
   id TEXT PRIMARY KEY,
   customer_id TEXT REFERENCES customers(id),
@@ -132,6 +227,12 @@ CREATE TABLE IF NOT EXISTS orders (
   stripe_payment_intent_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_email ON orders(customer_email);
+CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_email_created ON orders(customer_email, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_number ON orders(number);
 
 CREATE TABLE IF NOT EXISTS order_items (
   id TEXT PRIMARY KEY,
@@ -141,6 +242,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   qty INTEGER NOT NULL,
   unit_price_cents INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
 
 CREATE TABLE IF NOT EXISTS refunds (
   id TEXT PRIMARY KEY,
@@ -150,26 +252,9 @@ CREATE TABLE IF NOT EXISTS refunds (
   status TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_refunds_order_id ON refunds(order_id);
 
-CREATE TABLE IF NOT EXISTS discounts (
-  id TEXT PRIMARY KEY,
-  code TEXT UNIQUE,
-  type TEXT NOT NULL CHECK (type IN ('percentage', 'fixed_amount')),
-  value INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
-  min_purchase_cents INTEGER DEFAULT 0,
-  max_discount_cents INTEGER,
-  starts_at TEXT,
-  expires_at TEXT,
-  usage_limit INTEGER,
-  usage_limit_per_customer INTEGER DEFAULT 1,
-  usage_count INTEGER NOT NULL DEFAULT 0,
-  stripe_coupon_id TEXT,
-  stripe_promotion_code_id TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
+-- Discount usage (references discounts, orders)
 CREATE TABLE IF NOT EXISTS discount_usage (
   id TEXT PRIMARY KEY,
   discount_id TEXT NOT NULL REFERENCES discounts(id),
@@ -178,52 +263,11 @@ CREATE TABLE IF NOT EXISTS discount_usage (
   discount_amount_cents INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_discount_usage_order ON discount_usage(order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_usage_customer ON discount_usage(discount_id, customer_email);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_usage_order_discount ON discount_usage(order_id, discount_id);
 
-CREATE TABLE IF NOT EXISTS customers (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  name TEXT,
-  phone TEXT,
-  password_hash TEXT,
-  email_verified_at TEXT,
-  auth_provider TEXT,
-  auth_provider_id TEXT,
-  accepts_marketing INTEGER DEFAULT 0,
-  locale TEXT DEFAULT 'en',
-  metadata TEXT,
-  order_count INTEGER DEFAULT 0,
-  total_spent_cents INTEGER DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  last_order_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS customer_addresses (
-  id TEXT PRIMARY KEY,
-  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-  label TEXT,
-  is_default INTEGER DEFAULT 0,
-  name TEXT,
-  company TEXT,
-  line1 TEXT NOT NULL,
-  line2 TEXT,
-  city TEXT NOT NULL,
-  state TEXT,
-  postal_code TEXT NOT NULL,
-  country TEXT NOT NULL DEFAULT 'US',
-  phone TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS events (
-  id TEXT PRIMARY KEY,
-  stripe_event_id TEXT UNIQUE,
-  type TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  processed_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
+-- Webhooks
 CREATE TABLE IF NOT EXISTS webhooks (
   id TEXT PRIMARY KEY,
   url TEXT NOT NULL,
@@ -232,6 +276,7 @@ CREATE TABLE IF NOT EXISTS webhooks (
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_webhooks_status ON webhooks(status);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   id TEXT PRIMARY KEY,
@@ -245,7 +290,10 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   response_body TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
 
+-- OAuth
 CREATE TABLE IF NOT EXISTS oauth_clients (
   id TEXT PRIMARY KEY,
   client_id TEXT NOT NULL UNIQUE,
@@ -254,6 +302,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   redirect_uris TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_oauth_clients_client_id ON oauth_clients(client_id);
 
 CREATE TABLE IF NOT EXISTS oauth_authorizations (
   id TEXT PRIMARY KEY,
@@ -271,6 +320,7 @@ CREATE TABLE IF NOT EXISTS oauth_authorizations (
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_oauth_authorizations_client ON oauth_authorizations(client_id);
 
 CREATE TABLE IF NOT EXISTS oauth_tokens (
   id TEXT PRIMARY KEY,
@@ -283,13 +333,11 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   refresh_expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access ON oauth_tokens(access_token_hash);
+CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh ON oauth_tokens(refresh_token_hash);
+CREATE INDEX IF NOT EXISTS idx_oauth_tokens_customer ON oauth_tokens(customer_id);
 
-CREATE TABLE IF NOT EXISTS config (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
+-- UCP checkout sessions
 CREATE TABLE IF NOT EXISTS ucp_checkout_sessions (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'incomplete',
@@ -306,7 +354,11 @@ CREATE TABLE IF NOT EXISTS ucp_checkout_sessions (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_status ON ucp_checkout_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_stripe ON ucp_checkout_sessions(stripe_session_id);
+CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_expires ON ucp_checkout_sessions(expires_at);
 
+-- Analytics
 CREATE TABLE IF NOT EXISTS analytics_sessions (
   id TEXT PRIMARY KEY,
   first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -327,47 +379,6 @@ CREATE TABLE IF NOT EXISTS analytics_events (
   ip_country TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
-CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
-CREATE INDEX IF NOT EXISTS idx_variants_sku ON variants(sku);
-CREATE INDEX IF NOT EXISTS idx_variants_product ON variants(product_id);
-CREATE INDEX IF NOT EXISTS idx_inventory_sku ON inventory(sku);
-CREATE INDEX IF NOT EXISTS idx_carts_expires ON carts(expires_at);
-CREATE INDEX IF NOT EXISTS idx_carts_status ON carts(status);
-CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
-CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
-CREATE INDEX IF NOT EXISTS idx_orders_email ON orders(customer_email);
-CREATE INDEX IF NOT EXISTS idx_discounts_code ON discounts(code);
-CREATE INDEX IF NOT EXISTS idx_discounts_status ON discounts(status);
-CREATE INDEX IF NOT EXISTS idx_discount_usage_order ON discount_usage(order_id);
-CREATE INDEX IF NOT EXISTS idx_discount_usage_customer ON discount_usage(discount_id, customer_email);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_usage_order_discount ON discount_usage(order_id, discount_id);
-CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email);
-CREATE INDEX IF NOT EXISTS idx_customer_addresses_customer ON customer_addresses(customer_id);
-CREATE INDEX IF NOT EXISTS idx_webhooks_status ON webhooks(status);
-CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id);
-CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
-CREATE INDEX IF NOT EXISTS idx_oauth_clients_client_id ON oauth_clients(client_id);
-CREATE INDEX IF NOT EXISTS idx_oauth_authorizations_client ON oauth_authorizations(client_id);
-CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access ON oauth_tokens(access_token_hash);
-CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh ON oauth_tokens(refresh_token_hash);
-CREATE INDEX IF NOT EXISTS idx_oauth_tokens_customer ON oauth_tokens(customer_id);
-CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_orders_email_created ON orders(customer_email, created_at);
-CREATE INDEX IF NOT EXISTS idx_orders_number ON orders(number);
-CREATE INDEX IF NOT EXISTS idx_variants_status ON variants(status);
-CREATE INDEX IF NOT EXISTS idx_cart_items_cart_id ON cart_items(cart_id);
-CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
-CREATE INDEX IF NOT EXISTS idx_refunds_order_id ON refunds(order_id);
-CREATE INDEX IF NOT EXISTS idx_inventory_logs_sku_created ON inventory_logs(sku, created_at);
-CREATE INDEX IF NOT EXISTS idx_customers_last_order ON customers(last_order_at);
-CREATE INDEX IF NOT EXISTS idx_customers_created_at ON customers(created_at);
-CREATE INDEX IF NOT EXISTS idx_events_stripe_event_id ON events(stripe_event_id);
-CREATE INDEX IF NOT EXISTS idx_events_type_processed ON events(type, processed_at);
-CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_status ON ucp_checkout_sessions(status);
-CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_stripe ON ucp_checkout_sessions(stripe_session_id);
-CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_expires ON ucp_checkout_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_type_created ON analytics_events(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_session ON analytics_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_page_created ON analytics_events(page_path, created_at);
@@ -454,6 +465,7 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
 
     this.ctx.acceptWebSocket(server);
     this.sessions.set(server, { topics: new Set(topics) });
+    server.serializeAttachment({ topics: Array.from(topics) });
 
     for (const topic of topics) {
       const match = topic.match(/^presence\.product\.(.+)$/);
@@ -466,15 +478,25 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     try {
       const data = JSON.parse(message as string);
-      const session = this.sessions.get(ws);
-      if (!session) return;
+      let session = this.sessions.get(ws);
+      if (!session) {
+        const attachment = ws.deserializeAttachment() as { topics: string[] } | null;
+        if (attachment) {
+          session = { topics: new Set(attachment.topics) };
+          this.sessions.set(ws, session);
+        } else {
+          return;
+        }
+      }
 
       if (data.action === 'subscribe' && data.topic) {
         session.topics.add(data.topic);
+        ws.serializeAttachment({ topics: Array.from(session.topics) });
         const match = data.topic.match(/^presence\.product\.(.+)$/);
         if (match) this.broadcastPresenceCount(match[1]);
       } else if (data.action === 'unsubscribe' && data.topic) {
         session.topics.delete(data.topic);
+        ws.serializeAttachment({ topics: Array.from(session.topics) });
         const match = data.topic.match(/^presence\.product\.(.+)$/);
         if (match) this.broadcastPresenceCount(match[1]);
       }
@@ -540,12 +562,21 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       cartIds
     );
 
-    for (const item of reservedItems) {
-      this.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [item.qty, item.sku]);
-    }
+    try {
+      this.sql.exec('BEGIN');
 
-    this.run(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
-    this.run(`DELETE FROM cart_items WHERE cart_id IN (${placeholders})`, cartIds);
+      for (const item of reservedItems) {
+        this.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [item.qty, item.sku]);
+      }
+
+      this.run(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
+      this.run(`DELETE FROM cart_items WHERE cart_id IN (${placeholders})`, cartIds);
+
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
 
     // Broadcast inventory updates for each affected SKU
     for (const item of reservedItems) {

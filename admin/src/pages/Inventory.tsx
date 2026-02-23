@@ -52,6 +52,9 @@ export function Inventory() {
       setSelectedItem(updated);
       setAdjustDelta('');
     },
+    onError: (err: Error) => {
+      alert(err.message || 'Operation failed');
+    },
   });
 
   const columns = useMemo(
