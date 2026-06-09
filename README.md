@@ -164,6 +164,13 @@ Three mutation endpoints accept an `Idempotency-Key` header for safe retries:
 
 Semantics: same key + same body → cached response replayed (`Idempotency-Replayed: true`); same key + different body → `409 idempotency_conflict`; request still in flight → `409 idempotency_in_flight`. Keys are scoped per API key and expire after 24 hours.
 
+## Guides
+
+- [docs/storefront.md](docs/storefront.md) — Building a storefront: products, cart, checkout, live inventory WebSocket
+- [docs/webhooks.md](docs/webhooks.md) — Outbound webhooks: subscribing, event catalog, signature verification, retry semantics
+- [docs/oauth-ucp.md](docs/oauth-ucp.md) — OAuth 2.0 + PKCE flow and the Universal Commerce Protocol checkout session API
+- [docs/deployment.md](docs/deployment.md) — Deploying to Cloudflare, initializing keys, Stripe configuration, R2 setup
+
 ## API Reference
 
 All endpoints require `Authorization: Bearer <key>` except where noted.
