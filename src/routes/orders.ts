@@ -5,6 +5,7 @@ import { parseCompositeCursor } from '../lib/pagination';
 import { getStripe } from '../lib/stripe';
 import { dispatchWebhooks, type WebhookEventType } from '../lib/webhooks';
 import { adminOnly, authMiddleware } from '../middleware/auth';
+import { idempotencyMiddleware } from '../middleware/idempotency';
 import {
   CreateTestOrderBody,
   ErrorResponse,
@@ -219,7 +220,7 @@ const refundOrder = createRoute({
   summary: 'Refund an order',
   description: 'Full or partial refund via Stripe',
   security: [{ bearerAuth: [] }],
-  middleware: [adminOnly] as const,
+  middleware: [adminOnly, idempotencyMiddleware()] as const,
   request: {
     params: OrderIdParam,
     body: { content: { 'application/json': { schema: RefundOrderBody } } },

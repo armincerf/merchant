@@ -23,6 +23,9 @@ const EVENTS_RETENTION_DAYS = 30;
 /** How many days to keep webhook_deliveries rows. */
 const DELIVERIES_RETENTION_DAYS = 30;
 
+/** How many hours to keep idempotency_keys rows (Stripe-style 24-hour window). */
+const IDEMPOTENCY_RETENTION_HOURS = 24;
+
 export type WSEventType =
   | 'cart.updated'
   | 'cart.checked_out'
@@ -553,6 +556,17 @@ CREATE TABLE IF NOT EXISTS analytics_events (
 CREATE INDEX IF NOT EXISTS idx_analytics_events_type_created ON analytics_events(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_session ON analytics_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_page_created ON analytics_events(page_path, created_at);
+
+-- Idempotency keys (Stripe-style, 24-hour window)
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key_hash TEXT PRIMARY KEY,
+  endpoint TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  response_status INTEGER,
+  response_body TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys(created_at);
 `;
 
 export class MerchantDO extends DurableObject<MerchantEnv> {
@@ -2238,6 +2252,102 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     };
   }
 
+  // ─── Idempotency Methods ────────────────────────────────────────────────────
+
+  /**
+   * Atomically claim an idempotency key for processing.
+   *
+   * Uses INSERT OR IGNORE so only one concurrent winner can insert a row.
+   * State machine:
+   *   insert succeeded (changes=1)         → 'new'   (caller must process + complete)
+   *   row existed, response_status IS NULL → 'in_flight' (another request is processing)
+   *   row existed, endpoint/req_hash diff  → 'conflict' (same key, different request body)
+   *   row existed, response_status NOT NULL → 'replay' (cached response available)
+   */
+  idempotencyClaim(
+    keyHash: string,
+    endpoint: string,
+    requestHash: string,
+  ):
+    | { state: 'new' }
+    | { state: 'in_flight' }
+    | { state: 'replay'; status: number; body: string }
+    | { state: 'conflict' } {
+    this.ensureInitialized();
+
+    const result = this.ctx.storage.transactionSync(() => {
+      const insertResult = this.sqlRun(
+        `INSERT OR IGNORE INTO idempotency_keys (key_hash, endpoint, request_hash) VALUES (?, ?, ?)`,
+        [keyHash, endpoint, requestHash],
+      );
+
+      if (insertResult.changes > 0) {
+        return { state: 'new' as const };
+      }
+
+      // Row already existed — inspect it
+      const [existing] = this.sqlQuery<{
+        endpoint: string;
+        request_hash: string;
+        response_status: number | null;
+        response_body: string | null;
+      }>(
+        `SELECT endpoint, request_hash, response_status, response_body FROM idempotency_keys WHERE key_hash = ?`,
+        [keyHash],
+      );
+
+      if (!existing) {
+        // Race: deleted between INSERT and SELECT — treat as new
+        this.sqlRun(
+          `INSERT OR IGNORE INTO idempotency_keys (key_hash, endpoint, request_hash) VALUES (?, ?, ?)`,
+          [keyHash, endpoint, requestHash],
+        );
+        return { state: 'new' as const };
+      }
+
+      if (existing.endpoint !== endpoint || existing.request_hash !== requestHash) {
+        return { state: 'conflict' as const };
+      }
+
+      if (existing.response_status === null) {
+        return { state: 'in_flight' as const };
+      }
+
+      return {
+        state: 'replay' as const,
+        status: existing.response_status,
+        body: existing.response_body!,
+      };
+    });
+
+    return result as
+      | { state: 'new' }
+      | { state: 'in_flight' }
+      | { state: 'replay'; status: number; body: string }
+      | { state: 'conflict' };
+  }
+
+  /**
+   * Store the response for a successfully claimed idempotency key.
+   * Called after the handler completes (status < 500).
+   */
+  idempotencyComplete(keyHash: string, status: number, body: string): void {
+    this.ensureInitialized();
+    this.sqlRun(
+      `UPDATE idempotency_keys SET response_status = ?, response_body = ? WHERE key_hash = ?`,
+      [status, body, keyHash],
+    );
+  }
+
+  /**
+   * Delete a claimed idempotency key so the client can retry.
+   * Called when the handler threw an error (do not cache failed/errored requests).
+   */
+  idempotencyRelease(keyHash: string): void {
+    this.ensureInitialized();
+    this.sqlRun(`DELETE FROM idempotency_keys WHERE key_hash = ?`, [keyHash]);
+  }
+
   /**
    * Delete old analytics and operational records to bound table growth.
    *
@@ -2261,6 +2371,7 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     analyticsSessions: number;
     stripeEvents: number;
     webhookDeliveries: number;
+    idempotencyKeys: number;
   }> {
     this.ensureInitialized();
 
@@ -2302,11 +2413,21 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
        )`,
     );
 
+    const idempotencyResult = this.run(
+      `DELETE FROM idempotency_keys
+       WHERE key_hash IN (
+         SELECT key_hash FROM idempotency_keys
+         WHERE created_at < datetime('now', '-${IDEMPOTENCY_RETENTION_HOURS} hours')
+         LIMIT 1000
+       )`,
+    );
+
     return {
       analyticsEvents: eventsResult.changes,
       analyticsSessions: sessionsResult.changes,
       stripeEvents: stripeEventsResult.changes,
       webhookDeliveries: deliveriesResult.changes,
+      idempotencyKeys: idempotencyResult.changes,
     };
   }
 

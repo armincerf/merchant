@@ -5,6 +5,7 @@ import type { CartPayload, CheckoutReadyPayload, DomainError } from '../do';
 import { createApp } from '../lib/app';
 import { getStripe } from '../lib/stripe';
 import { authMiddleware } from '../middleware/auth';
+import { idempotencyMiddleware } from '../middleware/idempotency';
 import {
   AddCartItemBody,
   AddCartItemsBody,
@@ -85,6 +86,7 @@ const createCart = createRoute({
   path: '/',
   tags: ['Checkout'],
   summary: 'Create a new cart',
+  middleware: [idempotencyMiddleware()] as const,
   request: { body: { content: { 'application/json': { schema: CreateCartBody } } } },
   responses: {
     200: { content: { 'application/json': { schema: CartResponse } }, description: 'Created cart' },
@@ -257,6 +259,7 @@ const checkoutCart = createRoute({
   tags: ['Checkout'],
   summary: 'Initiate Stripe checkout',
   description: 'Creates a Stripe checkout session and returns the URL',
+  middleware: [idempotencyMiddleware()] as const,
   request: {
     params: CartIdParam,
     body: { content: { 'application/json': { schema: CheckoutBody } } },

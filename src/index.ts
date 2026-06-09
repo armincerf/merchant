@@ -139,6 +139,7 @@ export default {
         analyticsSessions: number;
         stripeEvents: number;
         webhookDeliveries: number;
+        idempotencyKeys: number;
       }>;
     };
 
@@ -147,7 +148,7 @@ export default {
 
     const pruned = await stub.pruneOldData();
     console.log(
-      `Cron: pruned analytics_events=${pruned.analyticsEvents} analytics_sessions=${pruned.analyticsSessions} stripe_events=${pruned.stripeEvents} webhook_deliveries=${pruned.webhookDeliveries}`,
+      `Cron: pruned analytics_events=${pruned.analyticsEvents} analytics_sessions=${pruned.analyticsSessions} stripe_events=${pruned.stripeEvents} webhook_deliveries=${pruned.webhookDeliveries} idempotency_keys=${pruned.idempotencyKeys}`,
     );
 
     const retried = await retryFailedDeliveries(stub as unknown as DOStub, ctx);

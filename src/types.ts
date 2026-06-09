@@ -45,6 +45,19 @@ export type DOStub = {
   // Stripe event idempotency
   claimEvent: (stripeEventId: string, type: string, payload: string) => Promise<ClaimEventResult>;
   releaseEventClaim: (stripeEventId: string) => Promise<void>;
+  // Request idempotency (Stripe-style Idempotency-Key header)
+  idempotencyClaim: (
+    keyHash: string,
+    endpoint: string,
+    requestHash: string,
+  ) => Promise<
+    | { state: 'new' }
+    | { state: 'in_flight' }
+    | { state: 'replay'; status: number; body: string }
+    | { state: 'conflict' }
+  >;
+  idempotencyComplete: (keyHash: string, status: number, body: string) => Promise<void>;
+  idempotencyRelease: (keyHash: string) => Promise<void>;
 };
 
 export type Variables = {

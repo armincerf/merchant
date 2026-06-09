@@ -134,6 +134,37 @@ POST /v1/carts/{id}/checkout
 
 Automatic tax calculation is enabled via Stripe Tax.
 
+### Idempotency
+
+Three mutation endpoints support the `Idempotency-Key` header for safe retries:
+
+- `POST /v1/carts` — create cart
+- `POST /v1/carts/{id}/checkout` — initiate Stripe checkout
+- `POST /v1/orders/{id}/refund` — refund order
+
+**Usage:**
+
+```bash
+# First request creates the cart
+curl -X POST http://localhost:8787/v1/carts \
+  -H "Authorization: Bearer pk_..." \
+  -H "Idempotency-Key: my-unique-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"customer_email":"buyer@example.com"}'
+
+# Identical retry returns the same response (no second cart created)
+# Response includes header: Idempotency-Replayed: true
+```
+
+**Semantics:**
+
+- Same key + same request body → cached response replayed, `Idempotency-Replayed: true` header set
+- Same key + different request body → `409 idempotency_conflict`
+- Request still in flight → `409 idempotency_in_flight`
+- Keys expire after **24 hours** (pruned by the cron job)
+- Key scope is per API key: different bearer tokens cannot read each other's cached responses
+- Only `2xx`/`4xx` responses from successful handler execution are cached; server errors (`5xx`) and thrown exceptions are not cached so the client can retry
+
 ### Customers (admin)
 
 ```bash
