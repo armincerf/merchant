@@ -70,13 +70,7 @@ webhooks.post('/stripe', async (c) => {
       const webhookSession = event.data.object as Stripe.Checkout.Session;
 
       if (webhookSession.metadata?.ucp_checkout_session_id) {
-        await handleUCPStripeWebhook(
-          db,
-          c.var.db,
-          c.executionCtx,
-          webhookSession.id,
-          webhookSession,
-        );
+        await handleUCPStripeWebhook(c.var.db, c.executionCtx, webhookSession.id, webhookSession);
       }
 
       const cartId = webhookSession.metadata?.cart_id;

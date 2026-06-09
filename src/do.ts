@@ -1,17 +1,13 @@
 import { DurableObject } from 'cloudflare:workers';
 import { calculateDiscount, type Discount, validateDiscountFields } from './lib/discounts';
+import type { Env } from './types';
 import { generateOrderNumber, now, uuid } from './types';
 
-export interface MerchantEnv {
-  MERCHANT: DurableObjectNamespace<MerchantDO>;
-  IMAGES?: R2Bucket;
-  IMAGES_URL?: string;
-  STORE_NAME?: string;
-  STRIPE_SECRET_KEY?: string;
-  STRIPE_WEBHOOK_SECRET?: string;
-  /** Set to "true" to render the magic link in the OAuth HTML response (local dev only). */
-  OAUTH_DEV_LINKS?: string;
-}
+/**
+ * The Durable Object environment type is identical to the Worker Env.
+ * Re-exported here so that existing imports of `MerchantEnv` continue to work.
+ */
+export type MerchantEnv = Env;
 
 export type WSEventType =
   | 'cart.updated'

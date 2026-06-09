@@ -118,7 +118,7 @@ export default {
     }
     return app.fetch(request, env, ctx);
   },
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
     const id = env.MERCHANT.idFromName('default');
     const stub = env.MERCHANT.get(id);
     const cleaned = await (

@@ -140,12 +140,6 @@ function activeCapabilities(): { name: string; version: string }[] {
   ];
 }
 
-function parseUCPAgentHeader(header: string | null): { profile?: string } {
-  if (!header) return {};
-  const match = header.match(/profile="([^"]+)"/);
-  return { profile: match?.[1] };
-}
-
 async function getStripeConfig(
   db: Database,
 ): Promise<{ secretKey: string | null; webhookSecret: string | null }> {
@@ -281,7 +275,6 @@ ucp.get('/.well-known/ucp', async (c) => {
 
 // POST /ucp/v1/checkout-sessions - Create Checkout
 ucp.post('/ucp/v1/checkout-sessions', async (c) => {
-  const _ucpAgent = parseUCPAgentHeader(c.req.header('UCP-Agent') || null);
   const body = await c.req.json();
   const { line_items, buyer, currency } = body;
 
@@ -738,7 +731,6 @@ ucp.post('/ucp/v1/checkout-sessions/:id/complete', async (c) => {
 
   const buyer = JSON.parse(session.buyer || '{}');
   const totals = JSON.parse(session.totals || '[]');
-  const _grandTotal = totals.find((t: any) => t.type === 'grand_total')?.amount || 0;
 
   const stripeConfig = await getStripeConfig(db);
 
@@ -883,7 +875,6 @@ ucp.delete('/ucp/v1/checkout-sessions/:id', async (c) => {
 // which calls finalizeOrderFromCart). UCP orders are not linked to a customer
 // record. This is tracked as a follow-up item.
 export async function handleUCPStripeWebhook(
-  db: ReturnType<typeof getDb>,
   stub: import('../types').DOStub,
   executionCtx: ExecutionContext,
   stripeSessionId: string,
