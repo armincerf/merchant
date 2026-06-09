@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import Stripe from 'stripe';
 import { type Database, getDb } from '../db';
+import { dispatchWebhooks } from '../lib/webhooks';
+import { authMiddleware, requireScope } from '../middleware/auth';
 import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 // ============================================================
@@ -162,6 +164,37 @@ async function getStripeConfig(
   }
 }
 
+/**
+ * Validate a URL string: must parse as a valid URL with http: or https: protocol.
+ * Throws ApiError.invalidRequest if invalid.
+ */
+function validateHttpUrl(value: string, fieldName: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw ApiError.invalidRequest(`${fieldName} is not a valid URL`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw ApiError.invalidRequest(`${fieldName} must use http or https protocol`);
+  }
+}
+
+// ============================================================
+// AUTH
+// ============================================================
+//
+// GET /.well-known/ucp is intentionally PUBLIC — discovery endpoints
+// must be reachable without credentials per the UCP specification.
+//
+// All /ucp/v1/* routes require a valid API key (pk or sk) or a valid
+// OAuth token. For OAuth tokens the `ucp:scopes:checkout_session` scope
+// is required for checkout-session routes (requireScope passes non-oauth
+// roles through without checking, so pk/sk keys are unaffected).
+
+ucp.use('/ucp/v1/*', authMiddleware);
+ucp.use('/ucp/v1/checkout-sessions*', requireScope('ucp:scopes:checkout_session'));
+
 // ============================================================
 // /.well-known/ucp - UCP PROFILE ENDPOINT
 // ============================================================
@@ -249,7 +282,7 @@ ucp.get('/.well-known/ucp', async (c) => {
 ucp.post('/ucp/v1/checkout-sessions', async (c) => {
   const _ucpAgent = parseUCPAgentHeader(c.req.header('UCP-Agent') || null);
   const body = await c.req.json();
-  const { line_items, buyer, currency, payment } = body;
+  const { line_items, buyer, currency } = body;
 
   if (!line_items || !Array.isArray(line_items) || line_items.length === 0) {
     throw ApiError.invalidRequest('line_items is required and must not be empty');
@@ -497,7 +530,7 @@ ucp.put('/ucp/v1/checkout-sessions/:id', async (c) => {
     throw ApiError.invalidRequest(`Cannot update ${session.status} checkout session`);
   }
 
-  const { line_items, buyer, currency, payment } = body;
+  const { line_items, buyer, currency } = body;
 
   // Re-resolve line items
   const resolvedItems: UCPLineItem[] = [];
@@ -562,7 +595,7 @@ ucp.put('/ucp/v1/checkout-sessions/:id', async (c) => {
   ];
 
   await db.run(
-    `UPDATE ucp_checkout_sessions 
+    `UPDATE ucp_checkout_sessions
      SET status = ?, currency = ?, line_items = ?, buyer = ?, totals = ?, messages = ?, updated_at = ?
      WHERE id = ?`,
     [
@@ -613,7 +646,17 @@ ucp.put('/ucp/v1/checkout-sessions/:id', async (c) => {
 ucp.post('/ucp/v1/checkout-sessions/:id/complete', async (c) => {
   const sessionId = c.req.param('id');
   const body = await c.req.json();
-  const { payment_data, risk_signals } = body;
+  const { payment_data } = body;
+
+  // ── URL validation ───────────────────────────────────────────────────────────
+  // Validate success_url / cancel_url BEFORE any Stripe API call so that
+  // invalid URLs are rejected even when Stripe is not configured.
+  if (payment_data?.success_url) {
+    validateHttpUrl(payment_data.success_url, 'success_url');
+  }
+  if (payment_data?.cancel_url) {
+    validateHttpUrl(payment_data.cancel_url, 'cancel_url');
+  }
 
   const db = getDb(c.var.db);
   const baseUrl = new URL(c.req.url).origin;
@@ -636,13 +679,62 @@ ucp.post('/ucp/v1/checkout-sessions/:id/complete', async (c) => {
     throw ApiError.invalidRequest(`Cannot complete checkout in ${session.status} state`);
   }
 
+  // ── Availability check ───────────────────────────────────────────────────────
+  // NOTE: UCP sessions do NOT hold inventory reservations (unlike carts, which
+  // reserve stock when items are added). A full reservation-with-release flow
+  // would require a cancel/expiry webhook to release reserved stock — that
+  // complexity is out of scope for this bead. Instead, we do a read-only
+  // availability check here and surface insufficient-stock as messages rather
+  // than a hard reject, consistent with the session creation behaviour.
+  const lineItems: UCPLineItem[] = JSON.parse(session.line_items || '[]');
+  const availabilityMessages: UCPMessage[] = [];
+  for (const li of lineItems) {
+    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [
+      li.item.id,
+    ]);
+    const available = inv ? inv.on_hand - inv.reserved : 0;
+    if (available < li.quantity) {
+      availabilityMessages.push({
+        type: 'error',
+        code: 'insufficient_inventory',
+        content: `Only ${available} of ${li.item.id} available`,
+        severity: 'recoverable',
+      });
+    }
+  }
+  if (availabilityMessages.length > 0) {
+    // Update session messages and revert to incomplete so the buyer can adjust
+    await db.run(
+      `UPDATE ucp_checkout_sessions SET status = 'incomplete', messages = ?, updated_at = ? WHERE id = ?`,
+      [JSON.stringify(availabilityMessages), now(), sessionId],
+    );
+    return c.json(
+      {
+        ucp: ucpEnvelope(activeCapabilities()),
+        id: sessionId,
+        status: 'incomplete' as const,
+        currency: session.currency,
+        line_items: lineItems,
+        buyer: JSON.parse(session.buyer || 'null') || undefined,
+        totals: JSON.parse(session.totals || '[]'),
+        messages: availabilityMessages,
+        links: [
+          { rel: 'privacy_policy', href: `${baseUrl}/privacy`, title: 'Privacy Policy' },
+          { rel: 'terms_of_service', href: `${baseUrl}/terms`, title: 'Terms of Service' },
+        ],
+        payment: { handlers: [] },
+        expires_at: session.expires_at,
+      },
+      409,
+    );
+  }
+
   // Mark as in progress
   await db.run(
     `UPDATE ucp_checkout_sessions SET status = 'complete_in_progress', updated_at = ? WHERE id = ?`,
     [now(), sessionId],
   );
 
-  const lineItems = JSON.parse(session.line_items || '[]');
   const buyer = JSON.parse(session.buyer || '{}');
   const totals = JSON.parse(session.totals || '[]');
   const _grandTotal = totals.find((t: any) => t.type === 'grand_total')?.amount || 0;
@@ -781,77 +873,66 @@ ucp.delete('/ucp/v1/checkout-sessions/:id', async (c) => {
 // ============================================================
 
 // This is called by Stripe webhook when checkout.session.completed
-// It completes the UCP checkout session and creates an order
+// It completes the UCP checkout session and creates an order.
+//
+// All SQL operations have been moved into the DO method ucpFinalizeOrder
+// for atomicity. The route function only extracts metadata and calls it.
+//
+// Known gap: customer upsert is skipped for UCP orders (unlike the cart flow
+// which calls finalizeOrderFromCart). UCP orders are not linked to a customer
+// record. This is tracked as a follow-up item.
 export async function handleUCPStripeWebhook(
-  db: Database,
+  db: ReturnType<typeof getDb>,
+  stub: import('../types').DOStub,
+  executionCtx: ExecutionContext,
   stripeSessionId: string,
   stripeSession: Stripe.Checkout.Session,
 ): Promise<void> {
   const ucpSessionId = stripeSession.metadata?.ucp_checkout_session_id;
   if (!ucpSessionId) return;
 
-  const [session] = await db.query<any>(
-    `SELECT * FROM ucp_checkout_sessions WHERE id = ? AND stripe_session_id = ?`,
-    [ucpSessionId, stripeSessionId],
-  );
+  const result = await stub.ucpFinalizeOrder({
+    ucpSessionId,
+    stripeSessionId,
+    stripePaymentIntent: stripeSession.payment_intent as string | null,
+  });
 
-  if (!session || session.status === 'completed') return;
+  if (!result.ok) {
+    // DomainError — nothing actionable; log and continue
+    console.error('ucpFinalizeOrder returned error', result);
+    return;
+  }
 
-  // Create order
-  const orderId = uuid();
-  const lineItems = JSON.parse(session.line_items || '[]');
-  const buyer = JSON.parse(session.buyer || '{}');
-  const totals = JSON.parse(session.totals || '[]');
-  const grandTotal = totals.find((t: any) => t.type === 'grand_total')?.amount || 0;
-
-  // Get next order number
-  const [orderCount] = await db.query<{ cnt: number }>(`SELECT COUNT(*) as cnt FROM orders`, []);
-  const orderNumber = `ORD-${String((orderCount?.cnt || 0) + 1).padStart(5, '0')}`;
-
-  // Insert order
-  await db.run(
-    `INSERT INTO orders (id, number, status, customer_email, subtotal_cents, tax_cents, shipping_cents, total_cents, currency, stripe_checkout_session_id, stripe_payment_intent_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      orderId,
-      orderNumber,
-      'paid',
-      buyer.email || stripeSession.customer_email,
-      grandTotal,
-      0,
-      0,
-      grandTotal,
-      session.currency,
-      stripeSessionId,
-      stripeSession.payment_intent,
-    ],
-  );
-
-  // Insert order items
-  for (const li of lineItems) {
-    await db.run(
-      `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuid(), orderId, li.item.id, li.item.title || li.item.id, li.quantity, li.unit_price.amount],
+  if (result.oversold) {
+    console.warn(
+      `UCP order ${result.orderNumber} created with oversold items — ` +
+        `on_hand was insufficient for one or more SKUs. ` +
+        `Payment succeeded; investigate and restock.`,
     );
   }
 
-  // Update UCP session
-  await db.run(
-    `UPDATE ucp_checkout_sessions SET status = 'completed', order_id = ?, order_number = ?, updated_at = ? WHERE id = ?`,
-    [orderId, orderNumber, now(), ucpSessionId],
-  );
-
-  // Deduct inventory
-  for (const item of lineItems) {
-    await db.run(
-      `UPDATE inventory SET on_hand = on_hand - ?, reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
-      [item.quantity, item.quantity, now(), item.item.id],
-    );
-
-    await db.run(`INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, 'sale')`, [
-      uuid(),
-      item.item.id,
-      -item.quantity,
-    ]);
-  }
+  // Dispatch order.created outbound webhook (mirrors cart flow in routes/webhooks.ts)
+  await dispatchWebhooks(stub, executionCtx, 'order.created', {
+    order: {
+      id: result.orderId,
+      number: result.orderNumber,
+      status: 'paid',
+      customer_email: result.customerEmail,
+      customer_id: null, // customer upsert is a known gap for UCP orders
+      amounts: {
+        total_cents: result.items.reduce((sum, i) => sum + i.unit_price_cents * i.qty, 0),
+        currency: result.currency,
+      },
+      items: result.items.map((i) => ({
+        sku: i.sku,
+        title: i.title,
+        qty: i.qty,
+        unit_price_cents: i.unit_price_cents,
+      })),
+      stripe: {
+        checkout_session_id: stripeSessionId,
+        payment_intent_id: stripeSession.payment_intent,
+      },
+    },
+  });
 }

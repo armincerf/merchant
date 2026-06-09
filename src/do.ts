@@ -132,6 +132,24 @@ export type ReleaseAbandonedCheckoutResult =
   | { released: true; skuAvailability: Array<{ sku: string; available: number }> }
   | { released: false; reason: 'not_found' | 'wrong_status' };
 
+// ─── UCP Finalize Order ─────────────────────────────────────────────────────
+
+export interface UCPFinalizeOrderArgs {
+  ucpSessionId: string;
+  stripeSessionId: string;
+  stripePaymentIntent: string | null;
+}
+
+export interface UCPFinalizeOrderResult {
+  ok: true;
+  orderId: string;
+  orderNumber: string;
+  customerEmail: string;
+  currency: string;
+  items: OrderItemPayload[];
+  oversold: boolean;
+}
+
 export interface TestOrderArgs {
   customerEmail: string;
   items: Array<{ sku: string; qty: number }>;
@@ -2019,6 +2037,197 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     }
   }
 
+  /**
+   * Atomically finalize a UCP checkout session into an order after Stripe payment.
+   *
+   * Idempotent: if the UCP session is already 'completed' OR an order with this
+   * stripe_checkout_session_id already exists, this is a no-op (returns ok:true
+   * with the existing order data).
+   *
+   * NOTE: UCP sessions do NOT hold inventory reservations (unlike carts). There
+   * is no release-on-cancel flow. We check on_hand at finalization time and clamp
+   * decrements at 0 rather than failing — because the payment already succeeded.
+   * Oversold items are flagged in the result for logging/alerting.
+   */
+  ucpFinalizeOrder(args: UCPFinalizeOrderArgs): UCPFinalizeOrderResult | DomainError {
+    this.ensureInitialized();
+
+    const { ucpSessionId, stripeSessionId, stripePaymentIntent } = args;
+
+    let orderId = '';
+    let orderNumber = '';
+    let customerEmail = '';
+    let currency = '';
+    const orderItemsResult: OrderItemPayload[] = [];
+    let oversold = false;
+    let alreadyFinalizedOrderId: string | null = null;
+    let alreadyFinalizedOrderNumber: string | null = null;
+    let alreadyFinalizedEmail: string | null = null;
+    let alreadyFinalizedCurrency: string | null = null;
+    let alreadyFinalizedItems: OrderItemPayload[] = [];
+
+    this.ctx.storage.transactionSync(() => {
+      // Check if UCP session already completed (idempotency)
+      const [session] = this.sqlQuery<{
+        id: string;
+        status: string;
+        currency: string;
+        line_items: string;
+        buyer: string;
+        totals: string;
+        order_id: string | null;
+        order_number: string | null;
+        stripe_session_id: string | null;
+      }>(`SELECT * FROM ucp_checkout_sessions WHERE id = ?`, [ucpSessionId]);
+
+      if (!session) return;
+
+      if (session.status === 'completed' && session.order_id) {
+        // Already finalized — collect order data for idempotent return
+        const existingItems = this.sqlQuery<{
+          sku: string;
+          title: string;
+          qty: number;
+          unit_price_cents: number;
+        }>(`SELECT sku, title, qty, unit_price_cents FROM order_items WHERE order_id = ?`, [
+          session.order_id,
+        ]);
+        const [existingOrder] = this.sqlQuery<{ customer_email: string; currency: string }>(
+          `SELECT customer_email, currency FROM orders WHERE id = ?`,
+          [session.order_id],
+        );
+        alreadyFinalizedOrderId = session.order_id;
+        alreadyFinalizedOrderNumber = session.order_number ?? '';
+        alreadyFinalizedEmail = existingOrder?.customer_email ?? '';
+        alreadyFinalizedCurrency = existingOrder?.currency ?? session.currency;
+        alreadyFinalizedItems = existingItems;
+        return;
+      }
+
+      // Belt-and-braces: check for existing order with this Stripe session id
+      const [existingOrder] = this.sqlQuery<{
+        id: string;
+        number: string;
+        customer_email: string;
+        currency: string;
+      }>(
+        `SELECT id, number, customer_email, currency FROM orders WHERE stripe_checkout_session_id = ?`,
+        [stripeSessionId],
+      );
+
+      if (existingOrder) {
+        const existingItems = this.sqlQuery<{
+          sku: string;
+          title: string;
+          qty: number;
+          unit_price_cents: number;
+        }>(`SELECT sku, title, qty, unit_price_cents FROM order_items WHERE order_id = ?`, [
+          existingOrder.id,
+        ]);
+        alreadyFinalizedOrderId = existingOrder.id;
+        alreadyFinalizedOrderNumber = existingOrder.number;
+        alreadyFinalizedEmail = existingOrder.customer_email;
+        alreadyFinalizedCurrency = existingOrder.currency;
+        alreadyFinalizedItems = existingItems;
+        return;
+      }
+
+      const lineItems: Array<{
+        id: string;
+        item: { id: string; title?: string };
+        quantity: number;
+        unit_price: { amount: number; currency: string };
+      }> = JSON.parse(session.line_items || '[]');
+
+      const buyer: { email?: string } = JSON.parse(session.buyer || '{}');
+      const totals: Array<{ type: string; amount: number }> = JSON.parse(session.totals || '[]');
+      const grandTotal = totals.find((t) => t.type === 'grand_total')?.amount ?? 0;
+      customerEmail = buyer.email ?? '';
+      currency = session.currency;
+
+      orderId = uuid();
+      orderNumber = generateOrderNumber();
+
+      this.sqlRun(
+        `INSERT INTO orders (id, number, status, customer_email, subtotal_cents, tax_cents, shipping_cents, total_cents, currency, stripe_checkout_session_id, stripe_payment_intent_id)
+         VALUES (?, ?, 'paid', ?, ?, 0, 0, ?, ?, ?, ?)`,
+        [
+          orderId,
+          orderNumber,
+          customerEmail,
+          grandTotal,
+          grandTotal,
+          currency,
+          stripeSessionId,
+          stripePaymentIntent,
+        ],
+      );
+
+      for (const li of lineItems) {
+        const sku = li.item.id;
+        const qty = li.quantity;
+        const title = li.item.title ?? sku;
+        const unitPrice = li.unit_price.amount;
+
+        this.sqlRun(
+          `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuid(), orderId, sku, title, qty, unitPrice],
+        );
+        orderItemsResult.push({ sku, title, qty, unit_price_cents: unitPrice });
+
+        // Deduct inventory; clamp at 0 — payment already succeeded,
+        // so we must not fail. Flag oversell for upstream logging.
+        const [inv] = this.sqlQuery<{ on_hand: number }>(
+          `SELECT on_hand FROM inventory WHERE sku = ?`,
+          [sku],
+        );
+        const currentOnHand = inv?.on_hand ?? 0;
+        const actualDeduct = Math.min(qty, currentOnHand);
+        if (actualDeduct < qty) oversold = true;
+
+        if (actualDeduct > 0) {
+          this.sqlRun(
+            `UPDATE inventory SET on_hand = on_hand - ?, reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+            [actualDeduct, actualDeduct, now(), sku],
+          );
+        }
+
+        this.sqlRun(
+          `INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, 'sale')`,
+          [uuid(), sku, -actualDeduct],
+        );
+      }
+
+      // Mark session completed
+      this.sqlRun(
+        `UPDATE ucp_checkout_sessions SET status = 'completed', order_id = ?, order_number = ?, updated_at = ? WHERE id = ?`,
+        [orderId, orderNumber, now(), ucpSessionId],
+      );
+    });
+
+    if (alreadyFinalizedOrderId !== null) {
+      return {
+        ok: true,
+        orderId: alreadyFinalizedOrderId,
+        orderNumber: alreadyFinalizedOrderNumber!,
+        customerEmail: alreadyFinalizedEmail!,
+        currency: alreadyFinalizedCurrency!,
+        items: alreadyFinalizedItems,
+        oversold: false,
+      };
+    }
+
+    return {
+      ok: true,
+      orderId,
+      orderNumber,
+      customerEmail,
+      currency,
+      items: orderItemsResult,
+      oversold,
+    };
+  }
+
   async cleanupExpiredCarts(): Promise<number> {
     this.ensureInitialized();
 
@@ -2079,6 +2288,14 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       this.releaseAbandonedCheckout(cartId);
     }
 
-    return expiredCarts.length + abandonedCarts.length;
+    // Phase 3: cancel expired UCP checkout sessions
+    const expiredUCPResult = this.run(
+      `UPDATE ucp_checkout_sessions SET status = 'canceled', updated_at = ?
+       WHERE status NOT IN ('completed', 'canceled') AND expires_at < ?`,
+      [now_, now_],
+    );
+    const expiredUCPCount = expiredUCPResult.changes;
+
+    return expiredCarts.length + abandonedCarts.length + expiredUCPCount;
   }
 }

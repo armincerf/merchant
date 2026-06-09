@@ -9,6 +9,8 @@ import {
   type ReleaseAbandonedCheckoutResult,
   type TestOrderArgs,
   type TestOrderResult,
+  type UCPFinalizeOrderArgs,
+  type UCPFinalizeOrderResult,
 } from './do';
 
 export type Env = {
@@ -39,6 +41,7 @@ export type DOStub = {
   finalizeOrderFromCart: (args: FinalizeOrderArgs) => Promise<FinalizeOrderResult | DomainError>;
   createTestOrder: (args: TestOrderArgs) => Promise<TestOrderResult | DomainError>;
   deleteProductCascade: (productId: string) => Promise<{ ok: true } | DomainError>;
+  ucpFinalizeOrder: (args: UCPFinalizeOrderArgs) => Promise<UCPFinalizeOrderResult | DomainError>;
   // Stripe event idempotency
   claimEvent: (stripeEventId: string, type: string, payload: string) => Promise<ClaimEventResult>;
   releaseEventClaim: (stripeEventId: string) => Promise<void>;
