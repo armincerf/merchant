@@ -1,7 +1,7 @@
 import { createRoute } from '@hono/zod-openapi';
 import { getDb } from '../db';
 import { createApp } from '../lib/app';
-import { generateWebhookSecret, retryDelivery } from '../lib/webhooks';
+import { generateWebhookSecret, MAX_TOTAL_ATTEMPTS, retryDelivery } from '../lib/webhooks';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
   CreateWebhookBody,
@@ -427,9 +427,13 @@ app.openapi(retryDeliveryRoute, async (c) => {
   );
   if (!delivery) throw ApiError.notFound('Delivery not found');
 
-  await db.run(`UPDATE webhook_deliveries SET status = 'pending', attempts = 0 WHERE id = ?`, [
-    deliveryId,
-  ]);
+  if (delivery.attempts >= MAX_TOTAL_ATTEMPTS) {
+    throw ApiError.invalidRequest(
+      `Delivery has reached the maximum of ${MAX_TOTAL_ATTEMPTS} cumulative attempts and cannot be retried`,
+    );
+  }
+
+  await db.run(`UPDATE webhook_deliveries SET status = 'pending' WHERE id = ?`, [deliveryId]);
 
   c.executionCtx.waitUntil(retryDelivery(c.var.db, webhook, delivery));
 

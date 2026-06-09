@@ -15,8 +15,36 @@ export type WebhookPayload = {
   data: Record<string, unknown>;
 };
 
-const MAX_ATTEMPTS = 3;
+/** Attempts made in a single deliverWebhook call (immediate + within-call retries). */
+const ATTEMPTS_PER_RUN = 3;
+
+/**
+ * Maximum cumulative attempts across all delivery runs (initial dispatch +
+ * cron-driven retries). 3 immediate + up to 2 cron retry runs × 3 = 9 total.
+ */
+export const MAX_TOTAL_ATTEMPTS = 9;
+
 const LOW_INVENTORY_THRESHOLD = 5;
+
+/**
+ * Exponential-backoff delay between within-run attempts, in milliseconds.
+ * Exported so tests can replace it with a zero-delay stub without affecting
+ * production behaviour.
+ *
+ * Usage in tests:
+ *   import { setBackoffMs } from '../src/lib/webhooks';
+ *   beforeAll(() => setBackoffMs(() => 0));
+ *   afterAll(() => setBackoffMs(null));  // restore default
+ */
+let _backoffMs: ((attempt: number) => number) | null = null;
+
+export function setBackoffMs(fn: ((attempt: number) => number) | null): void {
+  _backoffMs = fn;
+}
+
+function backoffMs(attempt: number): number {
+  return _backoffMs ? _backoffMs(attempt) : 2 ** attempt * 1000;
+}
 
 async function signPayload(payload: string, secret: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -89,11 +117,17 @@ export async function dispatchWebhooks(
     );
 
     ctx.waitUntil(
-      deliverWebhook(stub, webhook.id, webhook.url, webhook.secret, deliveryId, payload),
+      deliverWebhook(stub, webhook.id, webhook.url, webhook.secret, deliveryId, payload, 0),
     );
   }
 }
 
+/**
+ * Attempt delivery of a webhook up to ATTEMPTS_PER_RUN times, starting from
+ * `startAttempt` (the row's current cumulative attempt count). Each attempt
+ * increments the row's `attempts` column so the total is always cumulative
+ * across cron retry runs.
+ */
 async function deliverWebhook(
   stub: DOStub,
   webhookId: string,
@@ -101,6 +135,7 @@ async function deliverWebhook(
   secret: string,
   deliveryId: string,
   payload: WebhookPayload,
+  startAttempt: number,
 ): Promise<void> {
   const db = getDb(stub);
   const payloadString = JSON.stringify(payload);
@@ -111,10 +146,11 @@ async function deliverWebhook(
   let responseCode: number | null = null;
   let responseBody: string | null = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let n = 1; n <= ATTEMPTS_PER_RUN; n++) {
+    const cumulativeAttempts = startAttempt + n;
     try {
       await db.run(`UPDATE webhook_deliveries SET attempts = ?, last_attempt_at = ? WHERE id = ?`, [
-        attempt,
+        cumulativeAttempts,
         now(),
         deliveryId,
       ]);
@@ -136,8 +172,8 @@ async function deliverWebhook(
 
       if (response.ok) {
         await db.run(
-          `UPDATE webhook_deliveries 
-           SET status = 'success', response_code = ?, response_body = ? 
+          `UPDATE webhook_deliveries
+           SET status = 'success', response_code = ?, response_body = ?
            WHERE id = ?`,
           [responseCode, responseBody?.slice(0, 1000), deliveryId],
         );
@@ -146,8 +182,8 @@ async function deliverWebhook(
 
       if (responseCode >= 400 && responseCode < 500 && responseCode !== 429) {
         await db.run(
-          `UPDATE webhook_deliveries 
-           SET status = 'failed', response_code = ?, response_body = ? 
+          `UPDATE webhook_deliveries
+           SET status = 'failed', response_code = ?, response_body = ?
            WHERE id = ?`,
           [responseCode, responseBody?.slice(0, 1000), deliveryId],
         );
@@ -159,14 +195,14 @@ async function deliverWebhook(
       lastError = err instanceof Error ? err : new Error(String(err));
     }
 
-    if (attempt < MAX_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 2 ** attempt * 1000));
+    if (n < ATTEMPTS_PER_RUN) {
+      await new Promise((r) => setTimeout(r, backoffMs(n)));
     }
   }
 
   await db.run(
-    `UPDATE webhook_deliveries 
-     SET status = 'failed', response_code = ?, response_body = ? 
+    `UPDATE webhook_deliveries
+     SET status = 'failed', response_code = ?, response_body = ?
      WHERE id = ?`,
     [responseCode, lastError?.message?.slice(0, 1000) || responseBody?.slice(0, 1000), deliveryId],
   );
@@ -175,10 +211,18 @@ async function deliverWebhook(
 export async function retryDelivery(
   stub: DOStub,
   webhook: { id: string; url: string; secret: string },
-  delivery: { id: string; payload: string },
+  delivery: { id: string; payload: string; attempts: number },
 ): Promise<void> {
   const payload = JSON.parse(delivery.payload);
-  await deliverWebhook(stub, webhook.id, webhook.url, webhook.secret, delivery.id, payload);
+  await deliverWebhook(
+    stub,
+    webhook.id,
+    webhook.url,
+    webhook.secret,
+    delivery.id,
+    payload,
+    delivery.attempts,
+  );
 }
 
 export async function checkLowInventory(
@@ -208,12 +252,12 @@ export async function retryFailedDeliveries(stub: DOStub, ctx: ExecutionContext)
     `SELECT wd.id, wd.webhook_id, wd.payload, wd.attempts
      FROM webhook_deliveries wd
      JOIN webhooks w ON w.id = wd.webhook_id
-     WHERE wd.status = 'failed' 
+     WHERE wd.status = 'failed'
        AND wd.attempts < ?
        AND w.status = 'active'
        AND wd.created_at > datetime('now', '-24 hours')
      LIMIT 50`,
-    [MAX_ATTEMPTS],
+    [MAX_TOTAL_ATTEMPTS],
   );
 
   for (const delivery of failed) {
@@ -233,6 +277,7 @@ export async function retryFailedDeliveries(stub: DOStub, ctx: ExecutionContext)
           webhook.secret,
           delivery.id,
           JSON.parse(delivery.payload),
+          delivery.attempts,
         ),
       );
     }

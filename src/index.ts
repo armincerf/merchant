@@ -2,6 +2,7 @@ import { swaggerUI } from '@hono/swagger-ui';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { cors } from 'hono/cors';
 import { MerchantDO } from './do';
+import { retryFailedDeliveries } from './lib/webhooks';
 import { rateLimitMiddleware } from './middleware/rate-limit';
 import { analytics } from './routes/analytics';
 import { catalog } from './routes/catalog';
@@ -129,7 +130,7 @@ export default {
     }
     return app.fetch(request, env, ctx);
   },
-  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const id = env.MERCHANT.idFromName('default');
     const stub = env.MERCHANT.get(id) as unknown as {
       cleanupExpiredCarts: () => Promise<number>;
@@ -148,5 +149,8 @@ export default {
     console.log(
       `Cron: pruned analytics_events=${pruned.analyticsEvents} analytics_sessions=${pruned.analyticsSessions} stripe_events=${pruned.stripeEvents} webhook_deliveries=${pruned.webhookDeliveries}`,
     );
+
+    const retried = await retryFailedDeliveries(stub as unknown as DOStub, ctx);
+    console.log(`Cron: queued ${retried} failed webhook deliveries for retry`);
   },
 };

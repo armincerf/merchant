@@ -248,7 +248,23 @@ DELETE /v1/webhooks/{id}
 
 **Wildcards:** `order.*` or `*` for all events
 
-Payloads are signed with HMAC-SHA256. Verify with the `X-Merchant-Signature` header.
+#### Delivery semantics
+
+Merchant delivers webhooks with **at-least-once** guarantees:
+
+1. **3 immediate attempts** at dispatch time (exponential backoff: 2 s, 4 s between attempts).
+2. **Cron retries every 5 minutes** — failed deliveries within the last 24 hours are retried in batches of 50, up to **9 total cumulative attempts** (3 immediate + up to 2 cron retry runs of 3 each).
+3. After 9 attempts or 24 hours the delivery is not retried automatically. Manual retry via `POST /v1/webhooks/{id}/deliveries/{deliveryId}/retry` is rejected if the cap is reached.
+
+Each request includes the following headers for verification:
+
+| Header | Description |
+|---|---|
+| `X-Merchant-Signature` | HMAC-SHA256 hex digest of the raw request body, signed with your endpoint secret |
+| `X-Merchant-Timestamp` | Unix timestamp (seconds) when the delivery was created |
+| `X-Merchant-Delivery-Id` | Unique delivery ID (same as `payload.id`) |
+
+To verify a delivery, compute `HMAC-SHA256(secret, rawBody)` and compare it to `X-Merchant-Signature`.
 
 ## UCP (Universal Commerce Protocol)
 
