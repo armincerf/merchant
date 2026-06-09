@@ -2,13 +2,17 @@
 
 **The open-source commerce backend for Cloudflare + Stripe. Bring a Stripe key. Start selling.**
 
-A lightweight, API-first backend for products, inventory, checkout, and orders—designed to run on Cloudflare Workers with Stripe handling payments.
+[![CI](https://github.com/armincerf/merchant/actions/workflows/ci.yml/badge.svg)](https://github.com/armincerf/merchant/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue.svg)](https://www.typescriptlang.org/)
+
+A lightweight, API-first backend for products, inventory, checkout, and orders — designed to run on Cloudflare Workers with Stripe handling payments.
 
 ## Quick Start
 
 ```bash
-# 1. Clone & Install
-git clone https://github.com/ygwyg/merchant
+# 1. Clone & install
+git clone https://github.com/armincerf/merchant
 cd merchant && npm install
 
 # 2. Initialize (creates API keys)
@@ -32,7 +36,7 @@ cd admin && npm install && npm run dev
 
 ## Deploy to Cloudflare
 
-Durable Objects and R2 are **auto-provisioned** on first deploy — no manual setup required!
+Durable Objects and R2 are **auto-provisioned** on first deploy — no manual setup required.
 
 ```bash
 # Deploy (Durable Object + R2 bucket created automatically)
@@ -42,524 +46,393 @@ wrangler deploy
 npx tsx scripts/init.ts --remote
 ```
 
-## API Reference
-
-All endpoints require `Authorization: Bearer <key>` header.
-
-- `pk_...` → Public key. Can create carts and checkout.
-- `sk_...` → Admin key. Full access to everything.
-
-### Products (admin)
-
-```bash
-# List products (with pagination)
-GET /v1/products?limit=20&cursor=...&status=active
-
-# Get single product
-GET /v1/products/{id}
-
-# Create product
-POST /v1/products
-{"title": "T-Shirt", "description": "Premium cotton tee"}
-
-# Update product
-PATCH /v1/products/{id}
-{"title": "Updated Title", "status": "draft"}
-
-# Delete product (fails if variants have been ordered)
-DELETE /v1/products/{id}
-
-# Add variant
-POST /v1/products/{id}/variants
-{"sku": "TEE-BLK-M", "title": "Black / M", "price_cents": 2999}
-
-# Update variant
-PATCH /v1/products/{id}/variants/{variantId}
-{"price_cents": 3499}
-
-# Delete variant (fails if ordered)
-DELETE /v1/products/{id}/variants/{variantId}
-```
-
-### Inventory (admin)
-
-```bash
-# List inventory (with pagination)
-GET /v1/inventory?limit=100&cursor=...&low_stock=true
-
-# Get single SKU
-GET /v1/inventory?sku=TEE-BLK-M
-
-# Adjust inventory
-POST /v1/inventory/{sku}/adjust
-{"delta": 100, "reason": "restock"}
-# reason: restock | correction | damaged | return
-```
-
-**Query params:**
-
-- `limit` — Max items per page (default 100, max 500)
-- `cursor` — Pagination cursor (SKU of last item)
-- `low_stock` — Filter items with ≤10 available
-
-### Checkout (public)
-
-```bash
-# Create cart
-POST /v1/carts
-{"customer_email": "buyer@example.com"}
-
-# Get cart
-GET /v1/carts/{id}
-
-# Add items to cart (replaces existing items)
-POST /v1/carts/{id}/items
-{"items": [{"sku": "TEE-BLK-M", "qty": 2}]}
-
-# Checkout → returns Stripe URL
-POST /v1/carts/{id}/checkout
-{
-  "success_url": "https://...",
-  "cancel_url": "https://...",
-  "collect_shipping": true,
-  "shipping_countries": ["US", "CA", "GB"]
-}
-```
-
-**Checkout options:**
-
-- `collect_shipping` — Enable shipping address collection
-- `shipping_countries` — Allowed countries (default: `["US"]`)
-- `shipping_options` — Custom shipping rates (optional, has sensible defaults)
-
-Automatic tax calculation is enabled via Stripe Tax.
-
-### Idempotency
-
-Three mutation endpoints support the `Idempotency-Key` header for safe retries:
-
-- `POST /v1/carts` — create cart
-- `POST /v1/carts/{id}/checkout` — initiate Stripe checkout
-- `POST /v1/orders/{id}/refund` — refund order
-
-**Usage:**
-
-```bash
-# First request creates the cart
-curl -X POST http://localhost:8787/v1/carts \
-  -H "Authorization: Bearer pk_..." \
-  -H "Idempotency-Key: my-unique-key-123" \
-  -H "Content-Type: application/json" \
-  -d '{"customer_email":"buyer@example.com"}'
-
-# Identical retry returns the same response (no second cart created)
-# Response includes header: Idempotency-Replayed: true
-```
-
-**Semantics:**
-
-- Same key + same request body → cached response replayed, `Idempotency-Replayed: true` header set
-- Same key + different request body → `409 idempotency_conflict`
-- Request still in flight → `409 idempotency_in_flight`
-- Keys expire after **24 hours** (pruned by the cron job)
-- Key scope is per API key: different bearer tokens cannot read each other's cached responses
-- Only `2xx`/`4xx` responses from successful handler execution are cached; server errors (`5xx`) and thrown exceptions are not cached so the client can retry
-
-### Customers (admin)
-
-```bash
-# List customers (with pagination and search)
-GET /v1/customers?limit=20&cursor=...&search=john@example.com
-
-# Get customer with addresses
-GET /v1/customers/{id}
-
-# Get customer's order history
-GET /v1/customers/{id}/orders
-
-# Update customer
-PATCH /v1/customers/{id}
-{"name": "John Doe", "phone": "+1234567890"}
-
-# Add address
-POST /v1/customers/{id}/addresses
-{"line1": "123 Main St", "city": "NYC", "postal_code": "10001"}
-
-# Delete address
-DELETE /v1/customers/{id}/addresses/{addressId}
-```
-
-Customers are automatically created from Stripe checkout sessions (guest checkout by email).
-
-### Orders (admin)
-
-```bash
-# List orders (with pagination and filters)
-GET /v1/orders?limit=20&cursor=...&status=shipped&email=customer@example.com
-
-# Get order details
-GET /v1/orders/{id}
-
-# Update order status/tracking
-PATCH /v1/orders/{id}
-{"status": "shipped", "tracking_number": "1Z999...", "tracking_url": "https://..."}
-
-# Refund order
-POST /v1/orders/{id}/refund
-{"amount_cents": 1000}  # optional, omit for full refund
-
-# Create test order (skips Stripe, for testing)
-POST /v1/orders/test
-{"customer_email": "test@example.com", "items": [{"sku": "TEE-BLK-M", "qty": 1}]}
-```
-
-**Order statuses:** `pending` → `paid` → `processing` → `shipped` → `delivered` | `refunded` | `canceled`
-
-### Images (admin)
-
-```bash
-# Upload image
-POST /v1/images
-Content-Type: multipart/form-data
-file: <image file>
-# Returns: {"url": "...", "key": "..."}
-
-# Delete image
-DELETE /v1/images/{key}
-```
-
-### Setup (admin)
-
-```bash
-# Connect Stripe
-POST /v1/setup/stripe
-{"stripe_secret_key": "sk_...", "stripe_webhook_secret": "whsec_..."}
-```
-
-### API keys (admin)
-
-```bash
-# List all keys (id, key_prefix, role — never hashes)
-GET /v1/keys
-
-# Create a new key (full key shown once — save it immediately)
-POST /v1/keys
-{"role": "public"}   # or "admin"
-# Returns: {"id": "...", "key": "pk_a1b2c3...", "key_prefix": "pk_a1b2c3...", "role": "public", "created_at": "..."}
-
-# Revoke a key (refuses if it is the last admin key)
-DELETE /v1/keys/{id}
-```
-
-### Outbound Webhooks (admin)
-
-```bash
-# List webhooks
-GET /v1/webhooks
-
-# Create webhook
-POST /v1/webhooks
-{"url": "https://your-server.com/webhook", "events": ["order.created", "order.shipped"]}
-
-# Get webhook (includes recent deliveries)
-GET /v1/webhooks/{id}
-
-# Update webhook
-PATCH /v1/webhooks/{id}
-{"events": ["*"], "status": "paused"}
-
-# Rotate secret
-POST /v1/webhooks/{id}/rotate-secret
-
-# Delete webhook
-DELETE /v1/webhooks/{id}
-```
-
-**Events:** `order.created`, `order.updated`, `order.shipped`, `order.refunded`, `inventory.low`
-
-**Wildcards:** `order.*` or `*` for all events
-
-#### Delivery semantics
-
-Merchant delivers webhooks with **at-least-once** guarantees:
-
-1. **3 immediate attempts** at dispatch time (exponential backoff: 2 s, 4 s between attempts).
-2. **Cron retries every 5 minutes** — failed deliveries within the last 24 hours are retried in batches of 50, up to **9 total cumulative attempts** (3 immediate + up to 2 cron retry runs of 3 each).
-3. After 9 attempts or 24 hours the delivery is not retried automatically. Manual retry via `POST /v1/webhooks/{id}/deliveries/{deliveryId}/retry` is rejected if the cap is reached.
-
-Each request includes the following headers for verification:
-
-| Header | Description |
-|---|---|
-| `X-Merchant-Signature` | HMAC-SHA256 hex digest of the raw request body, signed with your endpoint secret |
-| `X-Merchant-Timestamp` | Unix timestamp (seconds) when the delivery was created |
-| `X-Merchant-Delivery-Id` | Unique delivery ID (same as `payload.id`) |
-
-To verify a delivery, compute `HMAC-SHA256(secret, rawBody)` and compare it to `X-Merchant-Signature`.
-
-## UCP (Universal Commerce Protocol)
-
-Merchant implements the [Universal Commerce Protocol](https://ucp.dev) for AI agent-to-commerce interoperability. UCP enables AI agents to discover, browse, and transact with any UCP-compliant merchant through a standard protocol.
-
-### UCP Discovery
-
-```bash
-# Get UCP profile with capabilities, services, and payment handlers
-GET /.well-known/ucp
-```
-
-Response includes:
-- **Capabilities**: `dev.ucp.shopping.checkout`, `dev.ucp.common.identity_linking`, `dev.ucp.shopping.order`
-- **Services**: REST endpoints for shopping operations
-- **Payment Handlers**: Stripe Checkout (redirect-based)
-
-### UCP Checkout Flow (for AI agents)
-
-```bash
-# 1. Create checkout session
-POST /ucp/v1/checkout-sessions
-{
-  "currency": "USD",
-  "line_items": [
-    {"item": {"id": "TEE-BLK-M"}, "quantity": 2}
-  ],
-  "buyer": {"email": "buyer@example.com"}
-}
-
-# 2. Complete checkout (returns Stripe redirect URL)
-POST /ucp/v1/checkout-sessions/{id}/complete
-{
-  "payment_data": {
-    "handler_id": "stripe_checkout",
-    "success_url": "https://your-app.com/success",
-    "cancel_url": "https://your-app.com/cancel"
-  }
-}
-
-# 3. Agent presents continue_url to user for payment
-```
-
-### UCP Checkout Session Lifecycle
-
-| Status | Description |
-|--------|-------------|
-| `incomplete` | Session created, items may have validation errors |
-| `requires_escalation` | Human interaction needed (payment redirect) |
-| `ready_for_complete` | Session can be completed |
-| `complete_in_progress` | Payment processing |
-| `completed` | Order created successfully |
-| `canceled` | Session canceled |
-
-### UCP Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/.well-known/ucp` | Profile discovery |
-| POST | `/ucp/v1/checkout-sessions` | Create checkout |
-| GET | `/ucp/v1/checkout-sessions/:id` | Get checkout |
-| PUT | `/ucp/v1/checkout-sessions/:id` | Update checkout |
-| POST | `/ucp/v1/checkout-sessions/:id/complete` | Complete checkout |
-| DELETE | `/ucp/v1/checkout-sessions/:id` | Cancel checkout |
-
-All UCP responses include a `ucp` envelope with version and active capabilities.
-
-## OAuth 2.0 (for platforms)
-
-Merchant supports OAuth 2.0 for platforms to act on behalf of customers. **Zero configuration required** — works out of the box.
-
-### Discovery
-
-```bash
-GET /.well-known/oauth-authorization-server
-```
-
-### Authorization Flow (PKCE required)
-
-```bash
-# 1. Redirect user to authorize
-GET /oauth/authorize?
-  client_id=your-app&
-  redirect_uri=https://your-app.com/callback&
-  response_type=code&
-  scope=openid%20profile%20checkout&
-  code_challenge=BASE64URL(SHA256(verifier))&
-  code_challenge_method=S256&
-  state=random-state
-
-# 2. User authenticates via magic link (email)
-
-# 3. Exchange code for tokens
-POST /oauth/token
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=authorization_code&
-code=AUTH_CODE&
-redirect_uri=https://your-app.com/callback&
-client_id=your-app&
-code_verifier=ORIGINAL_VERIFIER
-```
-
-### Scopes
-
-| Scope | Access |
-|-------|--------|
-| `openid` | Verify identity |
-| `profile` | Name and email |
-| `checkout` | Create orders on behalf of user |
-| `orders.read` | View order history |
-| `orders.write` | Manage orders |
-| `addresses.read` | Access saved addresses |
-| `addresses.write` | Manage addresses |
-
-### Using Access Tokens
-
-```bash
-curl https://your-store.com/v1/orders \
-  -H "Authorization: Bearer ACCESS_TOKEN"
-```
-
-Tokens work alongside API keys — existing integrations are unaffected.
-
-## Stripe Webhooks
-
-Set your Stripe webhook endpoint to `https://your-domain/v1/webhooks/stripe`
-
-Events handled:
-
-- `checkout.session.completed` → Creates order, deducts inventory
-
-For local development:
-
-```bash
-stripe listen --forward-to localhost:8787/v1/webhooks/stripe
-```
-
-## Rate Limiting
-
-All endpoints return rate limit headers:
-
-- `X-RateLimit-Limit` — Requests allowed per window
-- `X-RateLimit-Remaining` — Requests remaining
-- `X-RateLimit-Reset` — Unix timestamp when window resets
-
-Limits are configurable in `src/config/rate-limits.ts`.
-
-## Admin Dashboard
-
-```bash
-cd admin && npm install && npm run dev
-```
-
-Connect with your API URL and admin key (`sk_...`).
-
-## Example Store
-
-A complete vanilla JS storefront demonstrating the full checkout flow:
-
-```bash
-cd example && npm run dev
-```
-
-Update `example/src/config.js` with your public key (`pk_...`), then open http://localhost:3000
-
-Features:
-
-- **Orders** — Search, filter by status, update tracking, one-click refunds
-- **Inventory** — View stock levels, quick adjustments (+10, +50, etc.)
-- **Products** — Create products, add/edit variants, upload images
-- **Webhooks** — Create endpoints, view delivery history, rotate secrets
-- Light/dark mode, collapsible sidebar
-
-## Real-time Updates (WebSocket)
-
-WebSocket connections are authenticated via an API key supplied either as the `Authorization: Bearer <key>` header (server-to-server) or the `?key=<key>` query param (browsers, which cannot set custom headers on WS connections).
-
-**Public topics** (no key required, or any valid `pk_…` key):
-
-- `inventory` / `inventory.updated` — live stock-level changes
-- `presence.product.<id>` — live viewer count for a product page
-
-**Admin topics** (require a valid `sk_…` admin key):
-
-- `order`, `order.*` — order created / updated / shipped / refunded (contains customer PII)
-- `cart`, `cart.*` — cart updated / checked out
-- `inventory.low` — low-stock alerts
-- `*` — all events
-
-Disallowed topics are silently dropped at connection time and when subscribing dynamically. Non-admin sockets never receive order or cart events even if they somehow hold the topic (enforced at broadcast time as defence-in-depth).
-
-```javascript
-// Public connection (inventory + presence only)
-const ws = new WebSocket('wss://your-store.com/?topics=inventory,presence.product.prod_123&key=pk_...');
-
-// Admin connection (all events)
-const ws = new WebSocket('wss://your-store.com/?topics=*&key=sk_...');
-
-ws.onmessage = (event) => {
-  const { type, data, timestamp } = JSON.parse(event.data);
-  console.log(`Event: ${type}`, data);
-};
-
-// Subscribe/unsubscribe dynamically
-ws.send(JSON.stringify({ action: 'subscribe', topic: 'order' }));
-ws.send(JSON.stringify({ action: 'unsubscribe', topic: 'inventory' }));
-```
-
-**Event types:** `cart.updated`, `cart.checked_out`, `order.created`, `order.updated`, `order.shipped`, `order.refunded`, `inventory.updated`, `inventory.low`
-
 ## Architecture
+
+```mermaid
+graph TD
+    A[Client / Storefront] -->|REST + WS| W
+    B[Admin UI] -->|REST| W
+    C[AI agent<br>via UCP] -->|REST| W
+
+    W[Worker<br>Hono · auth · rate-limit]
+
+    W -->|RPC| D[MerchantDO<br>SQLite + WebSockets<br>atomic transaction methods]
+    W -->|HTTP| S[Stripe]
+    W -->|Put / Delete| R[R2<br>images]
+
+    CRON[Cron trigger<br>every 5 min] -->|cleanupExpiredCarts<br>pruneOldData<br>retryFailedDeliveries| D
+```
+
+**Source layout:**
 
 ```
 src/
-├── index.ts          # Entry point, routes
-├── do.ts             # Durable Object with SQLite + WebSocket
-├── db.ts             # Database wrapper
-├── types.ts          # Types and errors
+├── index.ts          # Entry point, route mounting, cron handler
+├── do.ts             # MerchantDO: SQLite schema, atomic transaction methods, WebSocket hub
+├── db.ts             # Thin RPC wrapper over the DO stub
+├── types.ts          # Shared types, ApiError, VERSION
 ├── middleware/
-│   └── auth.ts       # API key + OAuth auth
+│   ├── auth.ts       # API key + OAuth authentication
+│   ├── rate-limit.ts # Per-endpoint sliding-window counters
+│   └── idempotency.ts
 └── routes/
     ├── catalog.ts    # Products & variants
     ├── checkout.ts   # Carts & Stripe checkout
     ├── orders.ts     # Order management
     ├── inventory.ts  # Stock levels
     ├── customers.ts  # Customer management
+    ├── discounts.ts  # Discount codes (Stripe-synced)
+    ├── analytics.ts  # Event tracking, summary, funnel
     ├── images.ts     # R2 image upload
+    ├── keys.ts       # API key management
     ├── setup.ts      # Store configuration
-    ├── webhooks.ts   # Stripe webhooks
-    ├── oauth.ts      # OAuth 2.0 support
-    └── ucp.ts        # UCP (Universal Commerce Protocol)
+    ├── webhooks.ts   # Stripe webhook receiver
+    ├── webhooks-outbound.ts  # Outbound webhook endpoints
+    ├── oauth.ts      # OAuth 2.0 + PKCE
+    └── ucp.ts        # Universal Commerce Protocol
+```
+
+## Design & Scaling Model
+
+Every request resolves `MERCHANT.idFromName('default')` — there is exactly one `MerchantDO` instance per deployment. This gives you:
+
+- **Strong consistency.** All reads and writes go to a single SQLite database with no replication lag.
+- **Serialized writes.** Cloudflare's `transactionSync` API makes multi-step mutations (cart item reservation, order finalization, inventory deduction) atomic without distributed transactions or optimistic-concurrency retries.
+- **Zero infra.** No external database, cache, or message broker. The DO is the database and the WebSocket hub.
+
+**Throughput.** A single DO can handle thousands of simple read/write operations per second. For a single storefront — even a busy one — this is more than sufficient. If you need multiple stores, shard by store: replace `idFromName('default')` with `idFromName(storeId)` and each store gets its own isolated DO.
+
+**Cron.** The Worker's `scheduled` handler runs every 5 minutes and calls three DO methods: `cleanupExpiredCarts`, `pruneOldData` (analytics events after 90 days, Stripe event records after 30 days, webhook deliveries after 30 days, idempotency keys after 24 hours), and `retryFailedDeliveries` (outbound webhook retries).
+
+## Security Model
+
+### API Key Roles
+
+| Key prefix | Role | Access |
+|---|---|---|
+| `pk_...` | public | Create and read carts, public inventory availability, track analytics events |
+| `sk_...` | admin | Full access to all endpoints |
+
+Keys are stored as SHA-256 hashes. The plaintext key is shown **once** at creation — it cannot be recovered. Use `DELETE /v1/keys/{id}` to revoke; the last admin key cannot be deleted (prevents lockout).
+
+### OAuth 2.0 + PKCE
+
+Platforms and AI agents can act on behalf of customers using OAuth 2.0 authorization code flow with PKCE. Tokens authenticate the same `Authorization: Bearer` header as API keys — the middleware detects them by length/format (64-char hex = OAuth, otherwise API key).
+
+Supported scopes: `openid`, `profile`, `checkout`, `orders.read`, `orders.write`, `addresses.read`, `addresses.write`, plus UCP-specific `ucp:scopes:checkout_session`, `ucp:scopes:order`, `ucp:scopes:identity`.
+
+Discovery: `GET /.well-known/oauth-authorization-server`
+
+### UCP Route Authentication
+
+All `/ucp/v1/*` routes require authentication (any valid API key or OAuth token). The discovery endpoint `GET /.well-known/ucp` is public.
+
+### Outbound Webhook Signatures
+
+Every delivery includes:
+
+| Header | Value |
+|---|---|
+| `X-Merchant-Signature` | `HMAC-SHA256(secret, rawBody)` as hex |
+| `X-Merchant-Timestamp` | Unix seconds at delivery creation |
+| `X-Merchant-Delivery-Id` | Unique delivery ID |
+
+Rotate the secret with `POST /v1/webhooks/{id}/rotate-secret`.
+
+### WebSocket Topic Authorization
+
+Topics are checked at connection time and again at broadcast time (defense-in-depth):
+
+- **Public** (any valid `pk_...` key, or no key): `inventory` / `inventory.updated`, `presence.product.<id>`
+- **Admin only** (`sk_...` key required): `order`, `order.*`, `cart`, `cart.*`, `inventory.low`, `*`
+
+Disallowed topics are silently dropped; non-admin sockets never receive order or cart events even if they hold such a topic.
+
+### Rate Limiting
+
+All `/v1/*` and `/oauth/*` routes are rate-limited. Limits are scoped per endpoint group (configurable in `src/config/rate-limits.ts`). Counters are in-memory, per-isolate — they reset when the isolate recycles. For sustained high traffic a durable rate-limiting solution (Cloudflare Rate Limiting API or a KV-backed counter) would be more robust.
+
+Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
+
+### Idempotency
+
+Three mutation endpoints accept an `Idempotency-Key` header for safe retries:
+
+- `POST /v1/carts`
+- `POST /v1/carts/{id}/checkout`
+- `POST /v1/orders/{id}/refund`
+
+Semantics: same key + same body → cached response replayed (`Idempotency-Replayed: true`); same key + different body → `409 idempotency_conflict`; request still in flight → `409 idempotency_in_flight`. Keys are scoped per API key and expire after 24 hours.
+
+## API Reference
+
+All endpoints require `Authorization: Bearer <key>` except where noted.
+
+Interactive docs are served at `/docs` (Swagger UI backed by `/openapi.json`).
+
+### Products (admin)
+
+```bash
+GET    /v1/products?limit=20&cursor=...&status=active
+GET    /v1/products/{id}
+POST   /v1/products
+PATCH  /v1/products/{id}
+DELETE /v1/products/{id}          # fails if variants have been ordered
+
+POST   /v1/products/{id}/variants
+PATCH  /v1/products/{id}/variants/{variantId}
+DELETE /v1/products/{id}/variants/{variantId}
+
+POST   /v1/products/{id}/images
+DELETE /v1/products/{id}/images/{imageId}
+```
+
+### Inventory
+
+```bash
+# Public — no auth required
+GET  /v1/inventory/available?skus=SKU1,SKU2   # on_hand - reserved for each SKU
+
+# Admin
+GET  /v1/inventory?limit=100&cursor=...&low_stock=true
+GET  /v1/inventory?sku=TEE-BLK-M              # single SKU lookup
+POST /v1/inventory/{sku}/adjust
+     {"delta": 100, "reason": "restock"}
+     # reason: restock | correction | damaged | return
+```
+
+### Checkout (public key sufficient)
+
+```bash
+POST /v1/carts                     # {"customer_email": "buyer@example.com"}
+GET  /v1/carts/{id}
+POST /v1/carts/{id}/items          # replaces all items: {"items":[{"sku":"...","qty":2}]}
+POST /v1/carts/{id}/items/add      # incremental add/remove (positive/negative qty)
+POST /v1/carts/{id}/apply-discount # {"code": "SUMMER20"}
+DELETE /v1/carts/{id}/discount
+
+POST /v1/carts/{id}/checkout
+{
+  "success_url": "https://...",
+  "cancel_url":  "https://...",
+  "collect_shipping": true,
+  "shipping_countries": ["US", "CA", "GB"]
+}
+# Returns a Stripe Checkout URL. Stripe Tax is enabled automatically.
+```
+
+Carts expire 30 minutes after creation (extended to 60 minutes once checkout is initiated).
+
+### Orders (admin)
+
+```bash
+GET    /v1/orders?limit=20&cursor=...&status=shipped&email=customer@example.com
+GET    /v1/orders/{id}
+PATCH  /v1/orders/{id}             # {"status":"shipped","tracking_number":"...","tracking_url":"..."}
+POST   /v1/orders/{id}/refund      # {"amount_cents": 1000}  # omit for full refund
+POST   /v1/orders/test             # create test order (skips Stripe, for development)
+```
+
+**Order statuses:** `pending` → `paid` → `processing` → `shipped` → `delivered` | `refunded` | `canceled`
+
+### Customers (admin)
+
+```bash
+GET    /v1/customers?limit=20&cursor=...&search=john@example.com
+GET    /v1/customers/{id}
+GET    /v1/customers/{id}/orders
+PATCH  /v1/customers/{id}
+POST   /v1/customers/{id}/addresses
+DELETE /v1/customers/{id}/addresses/{addressId}
+```
+
+Customers are auto-created from Stripe checkout sessions.
+
+### Discounts (admin)
+
+```bash
+GET    /v1/discounts?limit=20&cursor=...
+GET    /v1/discounts/{id}
+POST   /v1/discounts              # {"code":"SUMMER20","type":"percentage","value":20}
+PATCH  /v1/discounts/{id}
+DELETE /v1/discounts/{id}         # deactivates, does not hard-delete
+```
+
+Discounts sync to Stripe coupons and promotion codes when Stripe is configured. Percentage discounts with `max_discount_cents` set are not synced to Stripe (Stripe does not support a capped percentage coupon).
+
+### Analytics (admin summary/funnel; public key for event tracking)
+
+```bash
+POST /v1/analytics/events          # track event (pk_ or sk_ key)
+# {"event_type":"product_view","session_id":"...","page_path":"/products/x"}
+# event_type: page_view | product_view | add_to_cart | checkout_started | order_completed
+# Bot requests are silently dropped (204 returned).
+
+GET  /v1/analytics/summary?period=30d   # admin only; period: 7d | 30d | 90d
+GET  /v1/analytics/funnel?period=30d    # admin only
+```
+
+### Images (admin)
+
+```bash
+POST   /v1/images          # multipart/form-data; field: file
+GET    /v1/images/{key}    # redirects to R2 URL
+DELETE /v1/images/{key}
+```
+
+### API Keys (admin)
+
+```bash
+GET    /v1/keys
+POST   /v1/keys            # {"role": "public"}  or  {"role": "admin"}
+DELETE /v1/keys/{id}       # refuses to delete last admin key
+```
+
+### Setup (admin)
+
+```bash
+POST /v1/setup/init    # create initial keys (only works if no keys exist)
+POST /v1/setup/stripe  # {"stripe_secret_key":"sk_...","stripe_webhook_secret":"whsec_..."}
+```
+
+### Outbound Webhooks (admin)
+
+```bash
+GET    /v1/webhooks
+POST   /v1/webhooks
+       {"url": "https://your-server.com/webhook", "events": ["order.created"]}
+GET    /v1/webhooks/{id}          # includes recent deliveries
+PATCH  /v1/webhooks/{id}          # {"events":["*"],"status":"paused"}
+DELETE /v1/webhooks/{id}
+POST   /v1/webhooks/{id}/rotate-secret
+GET    /v1/webhooks/{id}/deliveries/{deliveryId}
+POST   /v1/webhooks/{id}/deliveries/{deliveryId}/retry
+```
+
+**Supported events:** `order.created`, `order.updated`, `order.shipped`, `order.refunded`, `inventory.low`
+
+**Wildcards:** `order.*` or `*`
+
+**Delivery semantics:** at-least-once. 3 immediate attempts (exponential backoff), then cron retries every 5 minutes for deliveries that are still failing, up to **9 total cumulative attempts**. After 9 attempts or 24 hours, automatic retries stop. Manual retry via the retry endpoint is rejected once the cap is reached.
+
+### Stripe Webhooks
+
+```bash
+POST /v1/webhooks/stripe    # set this as your Stripe webhook URL
+```
+
+Events handled: `checkout.session.completed` → creates order, deducts inventory.
+
+```bash
+# Local development
+stripe listen --forward-to localhost:8787/v1/webhooks/stripe
+```
+
+### Real-time Updates (WebSocket)
+
+Authenticate with `Authorization: Bearer <key>` (server-to-server) or `?key=<key>` (browsers, which cannot set custom WS headers).
+
+```javascript
+// Public: inventory + presence
+const ws = new WebSocket('wss://your-store.com/?topics=inventory,presence.product.prod_123&key=pk_...');
+
+// Admin: all events
+const ws = new WebSocket('wss://your-store.com/?topics=*&key=sk_...');
+
+ws.onmessage = ({ data }) => {
+  const { type, data: payload, timestamp } = JSON.parse(data);
+};
+
+// Subscribe/unsubscribe after connecting
+ws.send(JSON.stringify({ action: 'subscribe',   topic: 'order' }));
+ws.send(JSON.stringify({ action: 'unsubscribe', topic: 'inventory' }));
+```
+
+**Event types:** `cart.updated`, `cart.checked_out`, `order.created`, `order.updated`, `order.shipped`, `order.refunded`, `inventory.updated`, `inventory.low`, `presence.count`
+
+### UCP (Universal Commerce Protocol)
+
+Implements [UCP](https://ucp.dev) for AI agent-to-commerce interoperability.
+
+```bash
+GET    /.well-known/ucp                              # public — discovery
+POST   /ucp/v1/checkout-sessions                     # requires auth
+GET    /ucp/v1/checkout-sessions/:id
+PUT    /ucp/v1/checkout-sessions/:id
+POST   /ucp/v1/checkout-sessions/:id/complete
+DELETE /ucp/v1/checkout-sessions/:id
+```
+
+Capabilities: `dev.ucp.shopping.checkout`, `dev.ucp.common.identity_linking`, `dev.ucp.shopping.order`
+
+### OAuth 2.0
+
+```bash
+GET  /.well-known/oauth-authorization-server         # discovery
+GET  /oauth/authorize                                # start flow (PKCE required)
+POST /oauth/authorize                                # submit email
+GET  /oauth/verify                                   # magic link callback
+POST /oauth/token                                    # exchange code or refresh
+POST /oauth/revoke                                   # revoke token
+```
+
+## Development
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm run lint        # Biome check
+npm run lint:fix    # Biome check --write
+npm test            # vitest run (via vitest-pool-workers)
+npm run dev         # wrangler dev
+```
+
+Tests run inside a real `workerd` runtime via `@cloudflare/vitest-pool-workers` — the same runtime Cloudflare uses in production. This means tests exercise the actual Durable Object, SQLite layer, and WebSocket behavior, not mocks.
+
+CI runs typecheck, lint, and tests on every push and pull request (see `.github/workflows/ci.yml`).
+
+## Admin Dashboard & Example Store
+
+```bash
+# Admin dashboard (connect with sk_... key)
+cd admin && npm install && npm run dev
+
+# Vanilla JS example storefront (connect with pk_... key)
+cd example && npm run dev
+# Edit example/src/config.js with your public key, then open http://localhost:3000
 ```
 
 ## Stack
 
-| Component | Technology                    |
-| --------- | ----------------------------- |
-| Runtime   | Cloudflare Workers            |
-| Framework | Hono                          |
-| Database  | Durable Objects (SQLite)      |
-| Real-time | WebSocket (DO native)         |
-| Images    | R2                            |
-| Payments  | Stripe                        |
+| Component | Technology |
+|---|---|
+| Runtime | Cloudflare Workers |
+| Framework | Hono + @hono/zod-openapi |
+| Database | Durable Objects (SQLite) |
+| Real-time | WebSocket (DO native) |
+| Images | Cloudflare R2 |
+| Payments | Stripe |
+| Tests | vitest-pool-workers |
+| Lint / Format | Biome |
 
 ## Migrating from D1
 
-If you're upgrading from an older version that used D1, use the migration script:
+If you're upgrading from an older version that used D1:
 
 ```bash
-# 1. Export your D1 data
+# 1. Export D1 data
 npx tsx scripts/migrate-d1-to-do.ts export --remote --db=merchant-db
 
-# 2. Deploy the new DO-based version
+# 2. Deploy new DO-based version
 wrangler deploy
 
 # 3. Initialize new API keys
 npx tsx scripts/init.ts --remote
 
-# 4. Import your data
+# 4. Import data
 npx tsx scripts/migrate-d1-to-do.ts import --file=d1-export-xxx.json --url=https://your-store.workers.dev --key=sk_...
 ```
 
-The migration imports products, variants, inventory, and discounts. Orders are exported for reference but not re-imported (they're historical records). API keys and OAuth tokens must be regenerated.
+Products, variants, inventory, and discounts are imported. Orders are exported for reference but not re-imported. API keys and OAuth tokens must be regenerated.
 
 ## License
 

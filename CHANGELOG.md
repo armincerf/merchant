@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `CONTRIBUTING.md` with setup, test, lint, and PR convention guide
+- `GET /v1/inventory/available` — public endpoint returning available stock (on_hand − reserved) for a list of SKUs; no auth required
+- `POST /v1/carts/{id}/items/add` — incremental single-item add/remove with atomic inventory reservation (positive qty adds, negative removes)
+- `POST /v1/carts/{id}/apply-discount` and `DELETE /v1/carts/{id}/discount` — discount code application on carts
+- `GET /v1/analytics/events`, `GET /v1/analytics/summary`, `GET /v1/analytics/funnel` — event tracking and aggregated analytics with bot detection
+- `/v1/discounts` CRUD (list, get, create, update, delete/deactivate) with Stripe coupon sync
+- `/v1/keys` CRUD (list, create, revoke) for API key management
+- `POST /v1/webhooks/{id}/deliveries/{deliveryId}/retry` — manual webhook delivery retry endpoint
+- Mermaid architecture diagram and "Design & scaling model" section in README
+- "Security model" section in README covering key roles, OAuth, webhook HMAC, WS topic auth, rate-limiting caveat, and idempotency
+
+### Changed
+
+- README clone URL corrected from `github.com/ygwyg/merchant` to `github.com/armincerf/merchant`
+- README badges added: CI, License MIT, TypeScript
+- README API reference expanded to cover analytics, discounts, keys, and incremental cart endpoints added during this polish effort
+- README WebSocket event types updated to include `presence.count` (matches `WSEventType` in `src/do.ts`)
+- README rate-limiting section now documents the in-memory/per-isolate caveat honestly
+- README "Development" section added covering typecheck, lint, test commands and vitest-pool-workers
+- CHANGELOG updated with Unreleased section covering this polish effort
+
+### Fixed
+
+- UCP routes now require authentication (was previously open)
+- Multi-step cart/order mutations moved into atomic `transactionSync` DO methods — eliminates partial-write races
+- Webhook retry logic is cumulative (max 9 total attempts including initial 3); README delivery semantics updated to match
+- OAuth HTML interpolations escaped to prevent XSS; dev magic link gated behind environment flag
+- WebSocket order/cart events restricted to admin keys at broadcast time (defense-in-depth)
+- Idempotency keys scoped per API key; `5xx` responses not cached so clients can retry
+
+### Security
+
+- API keys stored as SHA-256 hashes; plaintext never persisted
+- Last admin key deletion blocked to prevent lockout
+- Stripe webhook events claimed atomically before processing to prevent duplicate order creation
+- Abandoned checkout sessions release reserved inventory and discount reservations on expiry
+
 ## 0.2.0 (2025-01-11)
 
 This release is a significant architecture overhaul focused on performance, real-time capabilities, and agent interoperability.
