@@ -371,35 +371,19 @@ const deleteProduct = createRoute({
 
 app.openapi(deleteProduct, async (c) => {
   const { id } = c.req.valid('param');
-  const db = getDb(c.var.db);
 
-  const [product] = await db.query<any>(`SELECT * FROM products WHERE id = ?`, [id]);
-  if (!product) throw ApiError.notFound('Product not found');
+  const result = await c.var.db.deleteProductCascade(id);
 
-  const variants = await db.query<any>(`SELECT sku FROM variants WHERE product_id = ?`, [id]);
-
-  if (variants.length > 0) {
-    const skus = variants.map((v) => v.sku);
-    const placeholders = skus.map(() => '?').join(',');
-    const [orderItem] = await db.query<any>(
-      `SELECT id FROM order_items WHERE sku IN (${placeholders}) LIMIT 1`,
-      skus,
-    );
-
-    if (orderItem) {
-      throw ApiError.conflict(
-        'Cannot delete product with variants that have been ordered. Set status to draft instead.',
-      );
+  if (!result.ok) {
+    switch (result.code) {
+      case 'product_not_found':
+        throw ApiError.notFound('Product not found');
+      case 'product_has_orders':
+        throw ApiError.conflict(result.message);
+      default:
+        throw ApiError.invalidRequest('Failed to delete product');
     }
   }
-
-  for (const v of variants) {
-    await db.run(`DELETE FROM inventory WHERE sku = ?`, [v.sku]);
-  }
-
-  await db.run(`DELETE FROM product_images WHERE product_id = ?`, [id]);
-  await db.run(`DELETE FROM variants WHERE product_id = ?`, [id]);
-  await db.run(`DELETE FROM products WHERE id = ?`, [id]);
 
   return c.json({ deleted: true as const }, 200);
 });

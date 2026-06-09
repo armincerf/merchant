@@ -1,6 +1,7 @@
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { getDb } from '../db';
+import type { CartPayload, CheckoutReadyPayload, DomainError } from '../do';
 import { authMiddleware } from '../middleware/auth';
 import {
   AddCartItemBody,
@@ -28,6 +29,11 @@ const RemoveDiscountResponse = z
 const app = new OpenAPIHono<HonoEnv>();
 
 app.use('*', authMiddleware);
+
+/** Type guard for domain errors returned from DO methods. */
+function isDomainError(v: CartPayload | DomainError | CheckoutReadyPayload): v is DomainError {
+  return 'code' in v && 'message' in v;
+}
 
 const getCart = createRoute({
   method: 'get',
@@ -155,149 +161,27 @@ const addCartItems = createRoute({
 app.openapi(addCartItems, async (c) => {
   const { cartId } = c.req.valid('param');
   const { items } = c.req.valid('json');
-  const db = getDb(c.var.db);
 
-  const [cart] = await db.query<any>(`SELECT * FROM carts WHERE id = ?`, [cartId]);
-  if (!cart) throw ApiError.notFound('Cart not found');
-  if (cart.status !== 'open') throw ApiError.conflict('Cart is not open');
+  const result = await c.var.db.cartReplaceItems(cartId, items);
 
-  // Validate all items before any mutations
-  const validatedItems = [];
-  for (const { sku, qty } of items) {
-    const [variant] = await db.query<any>(`SELECT * FROM variants WHERE sku = ?`, [sku]);
-    if (!variant) throw ApiError.notFound(`SKU not found: ${sku}`);
-    if (variant.status !== 'active') throw ApiError.invalidRequest(`SKU not active: ${sku}`);
-
-    validatedItems.push({
-      sku,
-      title: variant.title,
-      qty,
-      unit_price_cents: variant.price_cents,
-    });
-  }
-
-  // Release inventory reservations for existing cart items before replacing
-  const oldCartItems = await db.query<any>(`SELECT sku, qty FROM cart_items WHERE cart_id = ?`, [
-    cartId,
-  ]);
-  for (const oldItem of oldCartItems) {
-    await db.run(
-      `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
-      [oldItem.qty, now(), oldItem.sku],
-    );
-  }
-
-  await db.run(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
-
-  // Reserve inventory atomically for each new item and insert cart items
-  for (const item of validatedItems) {
-    const result = await db.run(
-      `UPDATE inventory SET reserved = reserved + ?, updated_at = ? WHERE sku = ? AND on_hand - reserved >= ?`,
-      [item.qty, now(), item.sku, item.qty],
-    );
-    if (result.changes === 0) {
-      // Reservation failed — release any reservations made so far in this loop
-      // by querying what we've already inserted into cart_items
-      const insertedItems = await db.query<any>(
-        `SELECT sku, qty FROM cart_items WHERE cart_id = ?`,
-        [cartId],
-      );
-      for (const inserted of insertedItems) {
-        await db.run(
-          `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
-          [inserted.qty, now(), inserted.sku],
-        );
-      }
-      await db.run(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
-      throw ApiError.insufficientInventory(item.sku);
-    }
-
-    await db.run(
-      `INSERT INTO cart_items (id, cart_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuid(), cartId, item.sku, item.title, item.qty, item.unit_price_cents],
-    );
-  }
-
-  // Broadcast inventory updates for all affected SKUs (old released + new reserved)
-  const affectedSkuSet = new Set<string>();
-  oldCartItems.forEach((i) => affectedSkuSet.add(i.sku));
-  validatedItems.forEach((i) => affectedSkuSet.add(i.sku));
-  const affectedSkus = Array.from(affectedSkuSet);
-  for (const sku of affectedSkus) {
-    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [
-      sku,
-    ]);
-    const available = inv ? inv.on_hand - inv.reserved : 0;
-    c.var.db.broadcast({
-      type: 'inventory.updated',
-      data: { sku, available },
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  const allCartItems = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
-  const subtotalCents = allCartItems.reduce(
-    (sum, item) => sum + item.unit_price_cents * item.qty,
-    0,
-  );
-
-  let discountInfo = null;
-  let discountAmountCents = 0;
-  if (cart.discount_id) {
-    const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [
-      cart.discount_id,
-    ]);
-    if (discount) {
-      try {
-        await validateDiscount(db, discount as Discount, subtotalCents, cart.customer_email);
-        discountAmountCents = calculateDiscount(discount as Discount, subtotalCents);
-        await db.run(`UPDATE carts SET discount_amount_cents = ? WHERE id = ?`, [
-          discountAmountCents,
-          cartId,
-        ]);
-        discountInfo = {
-          code: discount.code,
-          type: discount.type as 'percentage' | 'fixed_amount',
-          amount_cents: discountAmountCents,
-        };
-      } catch {
-        await db.run(
-          `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-          [cartId],
-        );
-      }
-    } else {
-      await db.run(
-        `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-        [cartId],
-      );
+  if (isDomainError(result)) {
+    switch (result.code) {
+      case 'cart_not_found':
+        throw ApiError.notFound('Cart not found');
+      case 'cart_not_open':
+        throw ApiError.conflict('Cart is not open');
+      case 'sku_not_found':
+        throw ApiError.notFound(result.message);
+      case 'sku_not_active':
+        throw ApiError.invalidRequest(result.message);
+      case 'insufficient_inventory':
+        throw ApiError.insufficientInventory(result.details.sku);
+      default:
+        throw ApiError.invalidRequest('Failed to update cart');
     }
   }
 
-  return c.json(
-    {
-      id: cart.id,
-      status: cart.status,
-      currency: cart.currency,
-      customer_email: cart.customer_email,
-      items: allCartItems.map((item) => ({
-        sku: item.sku,
-        title: item.title,
-        qty: item.qty,
-        unit_price_cents: item.unit_price_cents,
-      })),
-      discount: discountInfo,
-      totals: {
-        subtotal_cents: subtotalCents,
-        discount_cents: discountAmountCents,
-        shipping_cents: 0,
-        tax_cents: 0,
-        total_cents: subtotalCents - discountAmountCents,
-      },
-      expires_at: cart.expires_at,
-    },
-    200,
-  );
+  return c.json(result as any, 200);
 });
 
 // === Incremental add/remove with atomic reservation ===
@@ -333,152 +217,36 @@ const addCartItem = createRoute({
 app.openapi(addCartItem, async (c) => {
   const { cartId } = c.req.valid('param');
   const { sku, qty } = c.req.valid('json');
-  const db = getDb(c.var.db);
 
   if (qty === 0) throw ApiError.invalidRequest('qty must be non-zero');
 
-  const [cart] = await db.query<any>(`SELECT * FROM carts WHERE id = ?`, [cartId]);
-  if (!cart) throw ApiError.notFound('Cart not found');
-  if (cart.status !== 'open') {
-    throw new ApiError('cart_not_open', 409, 'Cart is not open');
-  }
+  const result = await c.var.db.cartAddItem(cartId, sku, qty);
 
-  // Look up variant info
-  const [variant] = await db.query<any>(`SELECT * FROM variants WHERE sku = ?`, [sku]);
-  if (!variant) throw ApiError.notFound(`SKU not found: ${sku}`);
-  if (variant.status !== 'active') throw ApiError.invalidRequest(`SKU not active: ${sku}`);
-
-  // Get current cart item for this SKU
-  const [existingItem] = await db.query<any>(
-    `SELECT * FROM cart_items WHERE cart_id = ? AND sku = ?`,
-    [cartId, sku],
-  );
-  const currentQty = existingItem?.qty ?? 0;
-
-  if (qty > 0) {
-    // ADDING: reserve inventory atomically
-    const result = await db.run(
-      `UPDATE inventory SET reserved = reserved + ?, updated_at = ? WHERE sku = ? AND on_hand - reserved >= ?`,
-      [qty, now(), sku, qty],
-    );
-    if (result.changes === 0) {
-      throw ApiError.insufficientInventory(sku);
-    }
-
-    // Upsert cart item
-    if (existingItem) {
-      await db.run(`UPDATE cart_items SET qty = qty + ? WHERE cart_id = ? AND sku = ?`, [
-        qty,
-        cartId,
-        sku,
-      ]);
-    } else {
-      await db.run(
-        `INSERT INTO cart_items (id, cart_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-        [uuid(), cartId, sku, variant.title, qty, variant.price_cents],
-      );
-    }
-  } else {
-    // REMOVING: clamp to current cart qty, release reservation
-    const release = Math.min(Math.abs(qty), currentQty);
-    if (release <= 0) {
-      // Nothing to remove
-    } else {
-      await db.run(
-        `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
-        [release, now(), sku],
-      );
-
-      const newQty = currentQty - release;
-      if (newQty <= 0) {
-        await db.run(`DELETE FROM cart_items WHERE cart_id = ? AND sku = ?`, [cartId, sku]);
-      } else {
-        await db.run(`UPDATE cart_items SET qty = ? WHERE cart_id = ? AND sku = ?`, [
-          newQty,
-          cartId,
-          sku,
-        ]);
-      }
+  if (isDomainError(result)) {
+    switch (result.code) {
+      case 'cart_not_found':
+        throw ApiError.notFound('Cart not found');
+      case 'cart_not_open':
+        throw new ApiError('cart_not_open', 409, 'Cart is not open');
+      case 'sku_not_found':
+        throw ApiError.notFound(result.message);
+      case 'sku_not_active':
+        throw ApiError.invalidRequest(result.message);
+      case 'insufficient_inventory':
+        throw ApiError.insufficientInventory(result.details.sku);
+      default:
+        throw ApiError.invalidRequest('Failed to update cart');
     }
   }
 
-  // Reset expires_at to 30 min from now
-  const newExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-  await db.run(`UPDATE carts SET expires_at = ?, updated_at = ? WHERE id = ?`, [
-    newExpiresAt,
-    now(),
-    cartId,
-  ]);
-
-  // Broadcast inventory update
-  const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [sku]);
-  const available = inv ? inv.on_hand - inv.reserved : 0;
+  // Broadcast inventory update for affected SKU
   c.var.db.broadcast({
     type: 'inventory.updated',
-    data: { sku, available },
+    data: { sku },
     timestamp: new Date().toISOString(),
   });
 
-  // Build response
-  const allCartItems = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
-  const subtotalCents = allCartItems.reduce(
-    (sum, item) => sum + item.unit_price_cents * item.qty,
-    0,
-  );
-
-  // Recompute discount if present
-  let discountInfo = null;
-  let discountAmountCents = 0;
-  if (cart.discount_id) {
-    const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [
-      cart.discount_id,
-    ]);
-    if (discount) {
-      try {
-        await validateDiscount(db, discount as Discount, subtotalCents, cart.customer_email);
-        discountAmountCents = calculateDiscount(discount as Discount, subtotalCents);
-        await db.run(`UPDATE carts SET discount_amount_cents = ? WHERE id = ?`, [
-          discountAmountCents,
-          cartId,
-        ]);
-        discountInfo = {
-          code: discount.code,
-          type: discount.type as 'percentage' | 'fixed_amount',
-          amount_cents: discountAmountCents,
-        };
-      } catch {
-        await db.run(
-          `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-          [cartId],
-        );
-      }
-    }
-  }
-
-  return c.json(
-    {
-      id: cart.id,
-      status: cart.status,
-      currency: cart.currency,
-      customer_email: cart.customer_email,
-      items: allCartItems.map((item) => ({
-        sku: item.sku,
-        title: item.title,
-        qty: item.qty,
-        unit_price_cents: item.unit_price_cents,
-      })),
-      discount: discountInfo,
-      totals: {
-        subtotal_cents: subtotalCents,
-        discount_cents: discountAmountCents,
-        shipping_cents: 0,
-        tax_cents: 0,
-        total_cents: subtotalCents - discountAmountCents,
-      },
-      expires_at: newExpiresAt,
-    },
-    200,
-  );
+  return c.json(result as any, 200);
 });
 
 const checkoutCart = createRoute({
@@ -521,152 +289,38 @@ app.openapi(checkoutCart, async (c) => {
     throw ApiError.invalidRequest('Stripe not connected. POST /v1/setup/stripe first.');
   }
 
-  const db = getDb(c.var.db);
+  // Single atomic RPC: flip status, verify inventory, reserve discount
+  const checkoutReady = await c.var.db.cartBeginCheckout(cartId);
 
-  const statusUpdateResult = await db.run(
-    `UPDATE carts SET status = 'checked_out', updated_at = ? WHERE id = ? AND status = 'open'`,
-    [now(), cartId],
-  );
-
-  if (statusUpdateResult.changes === 0) {
-    const [cart] = await db.query<any>(`SELECT * FROM carts WHERE id = ?`, [cartId]);
-    if (!cart) throw ApiError.notFound('Cart not found');
-    if (cart.status !== 'open') throw ApiError.conflict('Cart is not open');
-    throw ApiError.invalidRequest('Failed to initiate checkout. Please try again.');
-  }
-
-  const [cart] = await db.query<any>(`SELECT * FROM carts WHERE id = ?`, [cartId]);
-  if (!cart) throw ApiError.notFound('Cart not found');
-
-  const items = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
-  if (items.length === 0) {
-    await db.run(`UPDATE carts SET status = 'open', updated_at = ? WHERE id = ?`, [now(), cartId]);
-    throw ApiError.invalidRequest('Cart is empty');
-  }
-
-  const subtotalCents = items.reduce((sum, item) => sum + item.unit_price_cents * item.qty, 0);
-
-  const revertCartStatus = async () => {
-    await db.run(`UPDATE carts SET status = 'open', updated_at = ? WHERE id = ?`, [now(), cartId]);
-  };
-
-  let discountAmountCents = 0;
-  let discount: Discount | null = null;
-  let discountReserved = false;
-
-  if (cart.discount_id) {
-    const [discountRow] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [
-      cart.discount_id,
-    ]);
-    if (discountRow) {
-      discount = discountRow as Discount;
-
-      try {
-        await validateDiscount(db, discount, subtotalCents, cart.customer_email);
-      } catch (err) {
-        await db.run(
-          `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-          [cartId],
-        );
-        await revertCartStatus();
-        if (err instanceof ApiError) throw err;
-        throw ApiError.invalidRequest('Discount is no longer valid');
-      }
-
-      const currentTime = now();
-
-      // NOTE: Per-customer usage check has a TOCTOU race condition. Two concurrent
-      // checkouts for the same customer can both pass this check before either inserts
-      // into discount_usage (which happens later in the webhook handler). A proper fix
-      // requires adding a UNIQUE(discount_id, customer_email) constraint on discount_usage
-      // so the INSERT in the webhook handler fails for the second checkout.
-      if (discount.usage_limit_per_customer !== null) {
-        const [usage] = await db.query<any>(
-          `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
-          [discount.id, cart.customer_email.toLowerCase()],
-        );
-        if (usage && usage.count >= discount.usage_limit_per_customer) {
-          await db.run(
-            `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-            [cartId],
-          );
-          await revertCartStatus();
-          throw ApiError.invalidRequest('You have already used this discount');
-        }
-      }
-
-      if (discount.usage_limit !== null) {
-        const result = await db.run(
-          `UPDATE discounts 
-           SET usage_count = usage_count + 1, updated_at = ? 
-           WHERE id = ? 
-             AND status = 'active'
-             AND (starts_at IS NULL OR starts_at <= ?)
-             AND (expires_at IS NULL OR expires_at >= ?)
-             AND usage_count < usage_limit`,
-          [currentTime, discount.id, currentTime, currentTime],
-        );
-
-        if (result.changes === 0) {
-          await db.run(
-            `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-            [cartId],
-          );
-          await revertCartStatus();
-          throw ApiError.invalidRequest('Discount usage limit reached');
-        }
-        discountReserved = true;
-      } else {
-        const result = await db.run(
-          `UPDATE discounts 
-           SET updated_at = ? 
-           WHERE id = ? 
-             AND status = 'active'
-             AND (starts_at IS NULL OR starts_at <= ?)
-             AND (expires_at IS NULL OR expires_at >= ?)`,
-          [currentTime, discount.id, currentTime, currentTime],
-        );
-
-        if (result.changes === 0) {
-          await db.run(
-            `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-            [cartId],
-          );
-          await revertCartStatus();
-          throw ApiError.invalidRequest('Discount is no longer valid');
-        }
-      }
-
-      discountAmountCents = calculateDiscount(discount, subtotalCents);
-    } else {
-      await db.run(
-        `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-        [cartId],
-      );
+  if (isDomainError(checkoutReady)) {
+    switch (checkoutReady.code) {
+      case 'cart_not_found':
+        throw ApiError.notFound('Cart not found');
+      case 'cart_not_open':
+        throw ApiError.conflict('Cart is not open');
+      case 'cart_empty':
+        throw ApiError.invalidRequest('Cart is empty');
+      case 'insufficient_inventory':
+        throw ApiError.insufficientInventory(checkoutReady.details.sku);
+      case 'discount_invalid':
+        throw ApiError.invalidRequest(checkoutReady.message);
+      default:
+        throw ApiError.invalidRequest('Failed to initiate checkout. Please try again.');
     }
   }
+
+  const { cart, items, discount } = checkoutReady;
+
+  const discountAmountCents = discount?.amount_cents ?? 0;
+  const discountReserved = discount !== null && discount.usage_limit !== null;
 
   const releaseReservedDiscount = async () => {
     if (discountReserved && discount) {
-      await db.run(
-        `UPDATE discounts SET usage_count = MAX(usage_count - 1, 0), updated_at = ? WHERE id = ?`,
-        [now(), discount.id],
-      );
+      await c.var.db.cartRevertCheckout(cartId, discount.id);
+    } else {
+      await c.var.db.cartRevertCheckout(cartId);
     }
   };
-
-  // Inventory is already reserved at add-to-cart time.
-  // Verify reservations are still valid (items exist and inventory is sufficient).
-  for (const item of items) {
-    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [
-      item.sku,
-    ]);
-    if (!inv || inv.on_hand < item.qty) {
-      await releaseReservedDiscount();
-      await revertCartStatus();
-      throw ApiError.insufficientInventory(item.sku);
-    }
-  }
 
   const stripe = new Stripe(stripeSecretKey);
 
@@ -706,7 +360,6 @@ app.openapi(checkoutCart, async (c) => {
         stripeCouponId = coupon.id;
       } catch (err: any) {
         await releaseReservedDiscount();
-        await revertCartStatus();
         console.error(`Failed to create Stripe coupon for discount: ${err.message}`);
         throw ApiError.invalidRequest(
           'Failed to apply discount. Please try again or remove the discount and proceed.',
@@ -757,12 +410,12 @@ app.openapi(checkoutCart, async (c) => {
     });
   } catch {
     await releaseReservedDiscount();
-    await revertCartStatus();
     throw ApiError.invalidRequest('Payment processing error. Please try again.');
   }
 
   // Extend expires_at to 60 min to cover Stripe hosted checkout time
   const checkoutExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const db = getDb(c.var.db);
   await db.run(
     `UPDATE carts SET stripe_checkout_session_id = ?, discount_amount_cents = ?, expires_at = ?, updated_at = ? WHERE id = ?`,
     [session.id, discountAmountCents, checkoutExpiresAt, now(), cartId],

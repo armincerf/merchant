@@ -1,4 +1,13 @@
-import { type MerchantDO } from './do';
+import {
+  type CartPayload,
+  type CheckoutReadyPayload,
+  type DomainError,
+  type FinalizeOrderArgs,
+  type FinalizeOrderResult,
+  type MerchantDO,
+  type TestOrderArgs,
+  type TestOrderResult,
+} from './do';
 
 export type Env = {
   MERCHANT: DurableObjectNamespace<MerchantDO>;
@@ -14,6 +23,17 @@ export type DOStub = {
   query: <T = unknown>(sql: string, params: unknown[]) => Promise<T[]>;
   run: (sql: string, params: unknown[]) => Promise<{ changes: number }>;
   broadcast: (event: { type: string; data: unknown; timestamp: string }) => void;
+  // Domain methods (atomic, single-RPC)
+  cartReplaceItems: (
+    cartId: string,
+    items: Array<{ sku: string; qty: number }>,
+  ) => Promise<CartPayload | DomainError>;
+  cartAddItem: (cartId: string, sku: string, qty: number) => Promise<CartPayload | DomainError>;
+  cartBeginCheckout: (cartId: string) => Promise<CheckoutReadyPayload | DomainError>;
+  cartRevertCheckout: (cartId: string, releaseDiscountId?: string) => Promise<void>;
+  finalizeOrderFromCart: (args: FinalizeOrderArgs) => Promise<FinalizeOrderResult | DomainError>;
+  createTestOrder: (args: TestOrderArgs) => Promise<TestOrderResult | DomainError>;
+  deleteProductCascade: (productId: string) => Promise<{ ok: true } | DomainError>;
 };
 
 export type Variables = {

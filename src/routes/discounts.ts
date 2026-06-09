@@ -1,6 +1,7 @@
 import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { type Database, getDb } from '../db';
+import { type Discount as _Discount, validateDiscountFields } from '../lib/discounts';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
   CreateDiscountBody,
@@ -14,52 +15,19 @@ import {
 } from '../schemas';
 import { ApiError, type HonoEnv, now, uuid } from '../types';
 
-type DiscountType = 'percentage' | 'fixed_amount';
+// Re-export shared types and pure functions for backward-compat with checkout.ts / orders.ts
+export type { Discount } from '../lib/discounts';
+export { calculateDiscount } from '../lib/discounts';
 
-export interface Discount {
-  id: string;
-  code: string | null;
-  type: DiscountType;
-  value: number;
-  status: string;
-  min_purchase_cents: number;
-  max_discount_cents: number | null;
-  starts_at: string | null;
-  expires_at: string | null;
-  usage_limit: number | null;
-  usage_limit_per_customer: number | null;
-  usage_count: number;
-  stripe_coupon_id: string | null;
-  stripe_promotion_code_id: string | null;
-}
+type DiscountType = 'percentage' | 'fixed_amount';
 
 export async function validateDiscount(
   db: Database,
-  discount: Discount,
+  discount: _Discount,
   subtotalCents: number,
   customerEmail?: string,
 ): Promise<void> {
-  if (discount.status !== 'active') {
-    throw ApiError.invalidRequest('Discount is not active');
-  }
-
-  const currentTime = now();
-  if (discount.starts_at && currentTime < discount.starts_at) {
-    throw ApiError.invalidRequest('Discount has not started yet');
-  }
-  if (discount.expires_at && currentTime > discount.expires_at) {
-    throw ApiError.invalidRequest('Discount has expired');
-  }
-
-  if (discount.min_purchase_cents > 0 && subtotalCents < discount.min_purchase_cents) {
-    throw ApiError.invalidRequest(
-      `Minimum purchase of $${(discount.min_purchase_cents / 100).toFixed(2)} required`,
-    );
-  }
-
-  if (discount.usage_limit !== null && discount.usage_count >= discount.usage_limit) {
-    throw ApiError.invalidRequest('Discount usage limit reached');
-  }
+  validateDiscountFields(discount, subtotalCents);
 
   if (customerEmail && discount.usage_limit_per_customer !== null) {
     const [usage] = await db.query<any>(
@@ -69,23 +37,6 @@ export async function validateDiscount(
     if (usage && usage.count >= discount.usage_limit_per_customer) {
       throw ApiError.invalidRequest('You have already used this discount');
     }
-  }
-}
-
-export function calculateDiscount(discount: Discount, subtotalCents: number): number {
-  switch (discount.type) {
-    case 'percentage': {
-      let amount = Math.floor((subtotalCents * discount.value) / 100);
-      if (discount.max_discount_cents !== null && amount > discount.max_discount_cents) {
-        amount = discount.max_discount_cents;
-      }
-      return amount;
-    }
-    case 'fixed_amount': {
-      return Math.min(discount.value, subtotalCents);
-    }
-    default:
-      return 0;
   }
 }
 

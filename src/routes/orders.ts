@@ -14,8 +14,7 @@ import {
   RefundResponse,
   UpdateOrderBody,
 } from '../schemas';
-import { ApiError, generateOrderNumber, type HonoEnv, now, uuid } from '../types';
-import { calculateDiscount, type Discount, validateDiscount } from './discounts';
+import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 const app = new OpenAPIHono<HonoEnv>();
 
@@ -321,173 +320,31 @@ const createTestOrder = createRoute({
 
 app.openapi(createTestOrder, async (c) => {
   const { customer_email, items, discount_code } = c.req.valid('json');
-  const db = getDb(c.var.db);
 
-  let subtotal = 0;
-  const orderItems = [];
+  const result = await c.var.db.createTestOrder({
+    customerEmail: customer_email,
+    items,
+    discountCode: discount_code ?? null,
+  });
 
-  for (const { sku, qty } of items) {
-    const [variant] = await db.query<any>(`SELECT * FROM variants WHERE sku = ?`, [sku]);
-    if (!variant) throw ApiError.notFound(`SKU not found: ${sku}`);
-
-    const [inv] = await db.query<any>(`SELECT * FROM inventory WHERE sku = ?`, [sku]);
-    const available = (inv?.on_hand ?? 0) - (inv?.reserved ?? 0);
-    if (available < qty) throw ApiError.insufficientInventory(sku);
-
-    subtotal += variant.price_cents * qty;
-    orderItems.push({
-      sku,
-      title: variant.title,
-      qty,
-      unit_price_cents: variant.price_cents,
-    });
-  }
-
-  let discountId = null;
-  let discountCode = null;
-  let discountAmountCents = 0;
-  let discount: Discount | null = null;
-
-  if (discount_code) {
-    const normalizedCode = discount_code.toUpperCase().trim();
-    const [discountRow] = await db.query<any>(`SELECT * FROM discounts WHERE code = ?`, [
-      normalizedCode,
-    ]);
-
-    if (discountRow) {
-      await validateDiscount(db, discountRow as Discount, subtotal, customer_email);
-      discountAmountCents = calculateDiscount(discountRow as Discount, subtotal);
-      discountId = discountRow.id;
-      discountCode = discountRow.code;
-      discount = discountRow as Discount;
-    } else {
-      throw ApiError.notFound('Discount code not found');
+  if (!result.ok) {
+    switch (result.code) {
+      case 'sku_not_found':
+        throw ApiError.notFound(result.message);
+      case 'insufficient_inventory':
+        throw ApiError.insufficientInventory(result.details.sku);
+      case 'discount_invalid':
+        // Map to appropriate HTTP error
+        if (result.message === 'Discount code not found') {
+          throw ApiError.notFound('Discount code not found');
+        }
+        throw ApiError.invalidRequest(result.message);
+      default:
+        throw ApiError.invalidRequest('Failed to create test order');
     }
   }
 
-  const totalCents = subtotal - discountAmountCents;
-  const timestamp = now();
-  let customerId: string | null = null;
-
-  const [existingCustomer] = await db.query<any>(
-    `SELECT id, order_count, total_spent_cents FROM customers WHERE email = ?`,
-    [customer_email],
-  );
-
-  if (existingCustomer) {
-    customerId = existingCustomer.id;
-    await db.run(
-      `UPDATE customers SET 
-        order_count = order_count + 1,
-        total_spent_cents = total_spent_cents + ?,
-        last_order_at = ?,
-        updated_at = ?
-      WHERE id = ?`,
-      [totalCents, timestamp, timestamp, customerId],
-    );
-  } else {
-    customerId = uuid();
-    await db.run(
-      `INSERT INTO customers (id, email, order_count, total_spent_cents, last_order_at)
-       VALUES (?, ?, 1, ?, ?)`,
-      [customerId, customer_email, totalCents, timestamp],
-    );
-  }
-
-  if (discount && discountAmountCents > 0) {
-    const currentTime = now();
-
-    if (discount.usage_limit_per_customer !== null) {
-      const [usage] = await db.query<any>(
-        `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
-        [discount.id, customer_email.toLowerCase()],
-      );
-      if (usage && usage.count >= discount.usage_limit_per_customer) {
-        throw ApiError.invalidRequest('You have already used this discount');
-      }
-    }
-
-    if (discount.usage_limit !== null) {
-      const result = await db.run(
-        `UPDATE discounts 
-         SET usage_count = usage_count + 1, updated_at = ? 
-         WHERE id = ? 
-           AND status = 'active'
-           AND (starts_at IS NULL OR starts_at <= ?)
-           AND (expires_at IS NULL OR expires_at >= ?)
-           AND usage_count < usage_limit`,
-        [currentTime, discountId, currentTime, currentTime],
-      );
-
-      if (result.changes === 0) {
-        throw ApiError.invalidRequest('Discount usage limit reached');
-      }
-    } else {
-      const result = await db.run(
-        `UPDATE discounts 
-         SET updated_at = ? 
-         WHERE id = ? 
-           AND status = 'active'
-           AND (starts_at IS NULL OR starts_at <= ?)
-           AND (expires_at IS NULL OR expires_at >= ?)`,
-        [currentTime, discountId, currentTime, currentTime],
-      );
-
-      if (result.changes === 0) {
-        throw ApiError.invalidRequest('Discount is no longer valid');
-      }
-    }
-  }
-
-  const orderNumber = generateOrderNumber();
-  const orderId = uuid();
-
-  await db.run(
-    `INSERT INTO orders (id, customer_id, number, status, customer_email, subtotal_cents, tax_cents, shipping_cents, total_cents, discount_code, discount_id, discount_amount_cents, created_at)
-     VALUES (?, ?, ?, 'paid', ?, ?, 0, 0, ?, ?, ?, ?, ?)`,
-    [
-      orderId,
-      customerId,
-      orderNumber,
-      customer_email,
-      subtotal,
-      totalCents,
-      discountCode,
-      discountId,
-      discountAmountCents,
-      timestamp,
-    ],
-  );
-
-  for (const item of orderItems) {
-    await db.run(
-      `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents],
-    );
-
-    await db.run(
-      `UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`,
-      [item.qty, item.qty, timestamp, item.sku],
-    );
-  }
-
-  if (discount && discountAmountCents > 0) {
-    const [existingUsage] = await db.query<any>(
-      `SELECT id FROM discount_usage WHERE order_id = ? AND discount_id = ?`,
-      [orderId, discountId],
-    );
-
-    if (!existingUsage) {
-      await db.run(
-        `INSERT INTO discount_usage (id, discount_id, order_id, customer_email, discount_amount_cents)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuid(), discountId, orderId, customer_email.toLowerCase(), discountAmountCents],
-      );
-    }
-  }
-
-  const [order] = await db.query<any>(`SELECT * FROM orders WHERE id = ?`, [orderId]);
-  return c.json(formatOrder(order, orderItems), 200);
+  return c.json(formatOrder(result.order, result.items), 200);
 });
 
 function formatOrder(order: any, items: any[]) {

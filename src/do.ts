@@ -1,4 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
+import { calculateDiscount, type Discount, validateDiscountFields } from './lib/discounts';
+import { generateOrderNumber, now, uuid } from './types';
 
 export interface MerchantEnv {
   MERCHANT: DurableObjectNamespace<MerchantDO>;
@@ -24,6 +26,135 @@ export interface WSEvent {
   type: WSEventType;
   data: unknown;
   timestamp: string;
+}
+
+// ─── Result types for domain methods ────────────────────────────────────────
+
+export type DomainError =
+  | { ok: false; code: 'cart_not_found'; message: string }
+  | { ok: false; code: 'cart_not_open'; message: string }
+  | { ok: false; code: 'sku_not_found'; message: string; details: { sku: string } }
+  | { ok: false; code: 'sku_not_active'; message: string; details: { sku: string } }
+  | { ok: false; code: 'insufficient_inventory'; message: string; details: { sku: string } }
+  | { ok: false; code: 'discount_invalid'; message: string }
+  | { ok: false; code: 'product_not_found'; message: string }
+  | { ok: false; code: 'product_has_orders'; message: string }
+  | { ok: false; code: 'cart_empty'; message: string };
+
+export interface CartItemPayload {
+  sku: string;
+  title: string;
+  qty: number;
+  unit_price_cents: number;
+}
+
+export interface CartDiscountInfo {
+  code: string;
+  type: 'percentage' | 'fixed_amount';
+  amount_cents: number;
+}
+
+export interface CartTotalsPayload {
+  subtotal_cents: number;
+  discount_cents: number;
+  shipping_cents: number;
+  tax_cents: number;
+  total_cents: number;
+}
+
+export interface CartPayload {
+  id: string;
+  status: string;
+  currency: string;
+  customer_email: string;
+  items: CartItemPayload[];
+  discount: CartDiscountInfo | null;
+  totals: CartTotalsPayload;
+  expires_at: string;
+}
+
+export interface CheckoutReadyPayload {
+  cart: {
+    id: string;
+    customer_email: string;
+    currency: string;
+    discount_id: string | null;
+    discount_amount_cents: number;
+    expires_at: string;
+  };
+  items: CartItemPayload[];
+  discount: (Discount & { amount_cents: number }) | null;
+  subtotal_cents: number;
+}
+
+export interface FinalizeOrderArgs {
+  cartId: string;
+  stripeSessionId: string;
+  stripePaymentIntent: string | null;
+  customerEmail: string;
+  shippingName: string | null;
+  shippingPhone: string | null;
+  shippingAddress: Record<string, unknown> | null;
+  subtotalCents: number;
+  taxCents: number;
+  shippingCents: number;
+  totalCents: number;
+  currency: string;
+  discountId: string | null;
+  discountCode: string | null;
+  discountAmountCents: number;
+}
+
+export interface OrderItemPayload {
+  sku: string;
+  title: string;
+  qty: number;
+  unit_price_cents: number;
+}
+
+export interface FinalizeOrderResult {
+  ok: true;
+  orderId: string;
+  orderNumber: string;
+  customerId: string;
+  items: OrderItemPayload[];
+  skuAvailability: Array<{ sku: string; available: number }>;
+}
+
+export interface TestOrderArgs {
+  customerEmail: string;
+  items: Array<{ sku: string; qty: number }>;
+  discountCode?: string | null;
+}
+
+export interface TestOrderResult {
+  ok: true;
+  order: {
+    id: string;
+    number: string;
+    status: string;
+    customer_email: string;
+    customer_id: string | null;
+    subtotal_cents: number;
+    discount_amount_cents: number;
+    tax_cents: number;
+    shipping_cents: number;
+    total_cents: number;
+    discount_code: string | null;
+    discount_id: string | null;
+    currency: string;
+    created_at: string;
+    // Fields present on DB rows but not applicable to test orders
+    shipping_name: null;
+    shipping_phone: null;
+    ship_to: null;
+    tracking_number: null;
+    tracking_url: null;
+    shipped_at: null;
+    stripe_checkout_session_id: null;
+    stripe_payment_intent_id: null;
+  };
+  items: OrderItemPayload[];
 }
 
 const SCHEMA = `
@@ -436,6 +567,1116 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     return { changes: result.changes };
   }
 
+  // ─── Internal sync helpers ──────────────────────────────────────────────────
+
+  private sqlQuery<T = Record<string, unknown>>(sql: string, params: unknown[] = []): T[] {
+    const cursor = this.sql.exec(sql, ...params);
+    return cursor.toArray() as T[];
+  }
+
+  private sqlRun(sql: string, params: unknown[] = []): { changes: number } {
+    this.sql.exec(sql, ...params);
+    const [result] = this.sql.exec('SELECT changes() as changes').toArray() as [
+      { changes: number },
+    ];
+    return { changes: result.changes };
+  }
+
+  /** Build the full cart payload synchronously from existing state. */
+  private buildCartPayload(
+    cart: Record<string, unknown>,
+    items: Array<Record<string, unknown>>,
+    expiresAt?: string,
+  ): CartPayload {
+    const subtotalCents = items.reduce(
+      (sum, item) => sum + (item.unit_price_cents as number) * (item.qty as number),
+      0,
+    );
+
+    let discountInfo: CartDiscountInfo | null = null;
+    let discountAmountCents = 0;
+
+    if (cart.discount_id) {
+      const [discount] = this.sqlQuery<Record<string, unknown>>(
+        `SELECT * FROM discounts WHERE id = ?`,
+        [cart.discount_id as string],
+      );
+      if (discount) {
+        try {
+          validateDiscountFields(discount as unknown as Discount, subtotalCents);
+          // Also check per-customer usage synchronously
+          if (
+            cart.customer_email &&
+            (discount.usage_limit_per_customer as number | null) !== null
+          ) {
+            const [usage] = this.sqlQuery<{ count: number }>(
+              `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
+              [discount.id as string, (cart.customer_email as string).toLowerCase()],
+            );
+            if (usage && usage.count >= (discount.usage_limit_per_customer as number)) {
+              // Discount no longer valid for this customer — clear it
+              this.sqlRun(
+                `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
+                [cart.id as string],
+              );
+              discountInfo = null;
+              discountAmountCents = 0;
+              return this._buildCartResponse(cart, items, expiresAt, null, 0, subtotalCents);
+            }
+          }
+          discountAmountCents = calculateDiscount(discount as unknown as Discount, subtotalCents);
+          this.sqlRun(`UPDATE carts SET discount_amount_cents = ? WHERE id = ?`, [
+            discountAmountCents,
+            cart.id as string,
+          ]);
+          discountInfo = {
+            code: discount.code as string,
+            type: discount.type as 'percentage' | 'fixed_amount',
+            amount_cents: discountAmountCents,
+          };
+        } catch {
+          // Discount no longer valid — clear it from cart
+          this.sqlRun(
+            `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
+            [cart.id as string],
+          );
+          discountInfo = null;
+          discountAmountCents = 0;
+        }
+      } else {
+        this.sqlRun(
+          `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
+          [cart.id as string],
+        );
+      }
+    }
+
+    return this._buildCartResponse(
+      cart,
+      items,
+      expiresAt,
+      discountInfo,
+      discountAmountCents,
+      subtotalCents,
+    );
+  }
+
+  private _buildCartResponse(
+    cart: Record<string, unknown>,
+    items: Array<Record<string, unknown>>,
+    expiresAt: string | undefined,
+    discountInfo: CartDiscountInfo | null,
+    discountAmountCents: number,
+    subtotalCents: number,
+  ): CartPayload {
+    return {
+      id: cart.id as string,
+      status: cart.status as string,
+      currency: cart.currency as string,
+      customer_email: cart.customer_email as string,
+      items: items.map((item) => ({
+        sku: item.sku as string,
+        title: item.title as string,
+        qty: item.qty as number,
+        unit_price_cents: item.unit_price_cents as number,
+      })),
+      discount: discountInfo,
+      totals: {
+        subtotal_cents: subtotalCents,
+        discount_cents: discountAmountCents,
+        shipping_cents: 0,
+        tax_cents: 0,
+        total_cents: subtotalCents - discountAmountCents,
+      },
+      expires_at: expiresAt ?? (cart.expires_at as string),
+    };
+  }
+
+  // ─── Domain Methods ─────────────────────────────────────────────────────────
+
+  /**
+   * Replace all items in a cart atomically.
+   * Validates cart open, validates variants active, releases old reservations,
+   * deletes old items, reserves+inserts new ones, recomputes subtotal,
+   * revalidates attached discount.
+   * Returns full cart payload so the route makes ZERO further reads.
+   */
+  cartReplaceItems(
+    cartId: string,
+    items: Array<{ sku: string; qty: number }>,
+  ): CartPayload | DomainError {
+    this.ensureInitialized();
+
+    return this.ctx.storage.transactionSync(() => {
+      const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
+        cartId,
+      ]);
+      if (!cart) return { ok: false, code: 'cart_not_found' as const, message: 'Cart not found' };
+      if (cart.status !== 'open')
+        return { ok: false, code: 'cart_not_open' as const, message: 'Cart is not open' };
+
+      // Validate all variants before any mutations
+      const validatedItems: Array<{
+        sku: string;
+        title: string;
+        qty: number;
+        unit_price_cents: number;
+      }> = [];
+      for (const { sku, qty } of items) {
+        const [variant] = this.sqlQuery<Record<string, unknown>>(
+          `SELECT * FROM variants WHERE sku = ?`,
+          [sku],
+        );
+        if (!variant)
+          return {
+            ok: false,
+            code: 'sku_not_found' as const,
+            message: `SKU not found: ${sku}`,
+            details: { sku },
+          };
+        if (variant.status !== 'active')
+          return {
+            ok: false,
+            code: 'sku_not_active' as const,
+            message: `SKU not active: ${sku}`,
+            details: { sku },
+          };
+        validatedItems.push({
+          sku,
+          title: variant.title as string,
+          qty,
+          unit_price_cents: variant.price_cents as number,
+        });
+      }
+
+      // Release existing reservations
+      const oldItems = this.sqlQuery<{ sku: string; qty: number }>(
+        `SELECT sku, qty FROM cart_items WHERE cart_id = ?`,
+        [cartId],
+      );
+      for (const old of oldItems) {
+        this.sqlRun(
+          `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+          [old.qty, now(), old.sku],
+        );
+      }
+
+      this.sqlRun(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
+
+      // Reserve + insert new items; if any reservation fails, release all
+      // already-reserved items in this same transaction (net-zero inventory change)
+      const reservedSkus: Array<{ sku: string; qty: number }> = [];
+      let insufficientSku: string | null = null;
+
+      for (const item of validatedItems) {
+        const result = this.sqlRun(
+          `UPDATE inventory SET reserved = reserved + ?, updated_at = ? WHERE sku = ? AND on_hand - reserved >= ?`,
+          [item.qty, now(), item.sku, item.qty],
+        );
+        if (result.changes === 0) {
+          insufficientSku = item.sku;
+          break;
+        }
+        reservedSkus.push({ sku: item.sku, qty: item.qty });
+        this.sqlRun(
+          `INSERT INTO cart_items (id, cart_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuid(), cartId, item.sku, item.title, item.qty, item.unit_price_cents],
+        );
+      }
+
+      if (insufficientSku !== null) {
+        // Release all reservations made so far and clear inserted cart items
+        for (const r of reservedSkus) {
+          this.sqlRun(
+            `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+            [r.qty, now(), r.sku],
+          );
+        }
+        this.sqlRun(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
+        return {
+          ok: false,
+          code: 'insufficient_inventory' as const,
+          message: `Insufficient inventory for SKU: ${insufficientSku}`,
+          details: { sku: insufficientSku },
+        };
+      }
+
+      const allItems = this.sqlQuery<Record<string, unknown>>(
+        `SELECT * FROM cart_items WHERE cart_id = ?`,
+        [cartId],
+      );
+
+      return this.buildCartPayload(cart, allItems);
+    }) as CartPayload | DomainError;
+  }
+
+  /**
+   * Incremental add/remove of a single SKU with atomic inventory reservation.
+   * Positive qty adds (reserves), negative qty removes (releases).
+   * Also bumps expires_at by 30 minutes.
+   */
+  cartAddItem(cartId: string, sku: string, qty: number): CartPayload | DomainError {
+    this.ensureInitialized();
+
+    return this.ctx.storage.transactionSync(() => {
+      const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
+        cartId,
+      ]);
+      if (!cart) return { ok: false, code: 'cart_not_found' as const, message: 'Cart not found' };
+      if (cart.status !== 'open')
+        return { ok: false, code: 'cart_not_open' as const, message: 'Cart is not open' };
+
+      const [variant] = this.sqlQuery<Record<string, unknown>>(
+        `SELECT * FROM variants WHERE sku = ?`,
+        [sku],
+      );
+      if (!variant)
+        return {
+          ok: false,
+          code: 'sku_not_found' as const,
+          message: `SKU not found: ${sku}`,
+          details: { sku },
+        };
+      if (variant.status !== 'active')
+        return {
+          ok: false,
+          code: 'sku_not_active' as const,
+          message: `SKU not active: ${sku}`,
+          details: { sku },
+        };
+
+      const [existingItem] = this.sqlQuery<{ id: string; qty: number }>(
+        `SELECT id, qty FROM cart_items WHERE cart_id = ? AND sku = ?`,
+        [cartId, sku],
+      );
+      const currentQty = existingItem?.qty ?? 0;
+
+      if (qty > 0) {
+        const result = this.sqlRun(
+          `UPDATE inventory SET reserved = reserved + ?, updated_at = ? WHERE sku = ? AND on_hand - reserved >= ?`,
+          [qty, now(), sku, qty],
+        );
+        if (result.changes === 0) {
+          return {
+            ok: false,
+            code: 'insufficient_inventory' as const,
+            message: `Insufficient inventory for SKU: ${sku}`,
+            details: { sku },
+          };
+        }
+
+        if (existingItem) {
+          this.sqlRun(`UPDATE cart_items SET qty = qty + ? WHERE cart_id = ? AND sku = ?`, [
+            qty,
+            cartId,
+            sku,
+          ]);
+        } else {
+          this.sqlRun(
+            `INSERT INTO cart_items (id, cart_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
+            [uuid(), cartId, sku, variant.title as string, qty, variant.price_cents as number],
+          );
+        }
+      } else {
+        const release = Math.min(Math.abs(qty), currentQty);
+        if (release > 0) {
+          this.sqlRun(
+            `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+            [release, now(), sku],
+          );
+          const newQty = currentQty - release;
+          if (newQty <= 0) {
+            this.sqlRun(`DELETE FROM cart_items WHERE cart_id = ? AND sku = ?`, [cartId, sku]);
+          } else {
+            this.sqlRun(`UPDATE cart_items SET qty = ? WHERE cart_id = ? AND sku = ?`, [
+              newQty,
+              cartId,
+              sku,
+            ]);
+          }
+        }
+      }
+
+      const newExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+      this.sqlRun(`UPDATE carts SET expires_at = ?, updated_at = ? WHERE id = ?`, [
+        newExpiresAt,
+        now(),
+        cartId,
+      ]);
+
+      const allItems = this.sqlQuery<Record<string, unknown>>(
+        `SELECT * FROM cart_items WHERE cart_id = ?`,
+        [cartId],
+      );
+
+      return this.buildCartPayload(cart, allItems, newExpiresAt);
+    }) as CartPayload | DomainError;
+  }
+
+  /**
+   * Atomically flip cart open→checked_out, load cart+items, verify inventory
+   * still consistent, validate+reserve discount usage.
+   * Returns everything the route needs for Stripe session creation.
+   */
+  cartBeginCheckout(cartId: string): CheckoutReadyPayload | DomainError {
+    this.ensureInitialized();
+
+    return this.ctx.storage.transactionSync(() => {
+      // Atomically flip status open→checked_out
+      const flipResult = this.sqlRun(
+        `UPDATE carts SET status = 'checked_out', updated_at = ? WHERE id = ? AND status = 'open'`,
+        [now(), cartId],
+      );
+
+      if (flipResult.changes === 0) {
+        const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
+          cartId,
+        ]);
+        if (!cart) return { ok: false, code: 'cart_not_found' as const, message: 'Cart not found' };
+        return { ok: false, code: 'cart_not_open' as const, message: 'Cart is not open' };
+      }
+
+      const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
+        cartId,
+      ]);
+      if (!cart) return { ok: false, code: 'cart_not_found' as const, message: 'Cart not found' };
+
+      const items = this.sqlQuery<Record<string, unknown>>(
+        `SELECT * FROM cart_items WHERE cart_id = ?`,
+        [cartId],
+      );
+
+      if (items.length === 0) {
+        // Revert status
+        this.sqlRun(`UPDATE carts SET status = 'open', updated_at = ? WHERE id = ?`, [
+          now(),
+          cartId,
+        ]);
+        return { ok: false, code: 'cart_empty' as const, message: 'Cart is empty' };
+      }
+
+      const subtotalCents = items.reduce(
+        (sum, item) => sum + (item.unit_price_cents as number) * (item.qty as number),
+        0,
+      );
+
+      // Verify inventory is still sufficient
+      for (const item of items) {
+        const [inv] = this.sqlQuery<{ on_hand: number; reserved: number }>(
+          `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
+          [item.sku as string],
+        );
+        if (!inv || inv.on_hand < (item.qty as number)) {
+          this.sqlRun(`UPDATE carts SET status = 'open', updated_at = ? WHERE id = ?`, [
+            now(),
+            cartId,
+          ]);
+          return {
+            ok: false,
+            code: 'insufficient_inventory' as const,
+            message: `Insufficient inventory for SKU: ${item.sku as string}`,
+            details: { sku: item.sku as string },
+          };
+        }
+      }
+
+      // Validate and reserve discount usage
+      let discountObj: (Discount & { amount_cents: number }) | null = null;
+      let finalDiscountAmountCents = (cart.discount_amount_cents as number) ?? 0;
+
+      if (cart.discount_id) {
+        const [discountRow] = this.sqlQuery<Record<string, unknown>>(
+          `SELECT * FROM discounts WHERE id = ?`,
+          [cart.discount_id as string],
+        );
+
+        if (discountRow) {
+          const discount = discountRow as unknown as Discount;
+
+          try {
+            validateDiscountFields(discount, subtotalCents);
+          } catch (err) {
+            // Discount no longer valid — clear and revert
+            this.sqlRun(
+              `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0, status = 'open', updated_at = ? WHERE id = ?`,
+              [now(), cartId],
+            );
+            if (err instanceof Error) {
+              return {
+                ok: false,
+                code: 'discount_invalid' as const,
+                message: err.message,
+              };
+            }
+            return {
+              ok: false,
+              code: 'discount_invalid' as const,
+              message: 'Discount is no longer valid',
+            };
+          }
+
+          // Check per-customer usage
+          if (discount.usage_limit_per_customer !== null) {
+            const [usage] = this.sqlQuery<{ count: number }>(
+              `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
+              [discount.id, (cart.customer_email as string).toLowerCase()],
+            );
+            if (usage && usage.count >= discount.usage_limit_per_customer) {
+              this.sqlRun(
+                `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0, status = 'open', updated_at = ? WHERE id = ?`,
+                [now(), cartId],
+              );
+              return {
+                ok: false,
+                code: 'discount_invalid' as const,
+                message: 'You have already used this discount',
+              };
+            }
+          }
+
+          const currentTime = now();
+
+          if (discount.usage_limit !== null) {
+            const result = this.sqlRun(
+              `UPDATE discounts
+               SET usage_count = usage_count + 1, updated_at = ?
+               WHERE id = ?
+                 AND status = 'active'
+                 AND (starts_at IS NULL OR starts_at <= ?)
+                 AND (expires_at IS NULL OR expires_at >= ?)
+                 AND usage_count < usage_limit`,
+              [currentTime, discount.id, currentTime, currentTime],
+            );
+
+            if (result.changes === 0) {
+              this.sqlRun(
+                `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0, status = 'open', updated_at = ? WHERE id = ?`,
+                [now(), cartId],
+              );
+              return {
+                ok: false,
+                code: 'discount_invalid' as const,
+                message: 'Discount usage limit reached',
+              };
+            }
+          } else {
+            const result = this.sqlRun(
+              `UPDATE discounts
+               SET updated_at = ?
+               WHERE id = ?
+                 AND status = 'active'
+                 AND (starts_at IS NULL OR starts_at <= ?)
+                 AND (expires_at IS NULL OR expires_at >= ?)`,
+              [currentTime, discount.id, currentTime, currentTime],
+            );
+
+            if (result.changes === 0) {
+              this.sqlRun(
+                `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0, status = 'open', updated_at = ? WHERE id = ?`,
+                [now(), cartId],
+              );
+              return {
+                ok: false,
+                code: 'discount_invalid' as const,
+                message: 'Discount is no longer valid',
+              };
+            }
+          }
+
+          finalDiscountAmountCents = calculateDiscount(discount, subtotalCents);
+          discountObj = { ...discount, amount_cents: finalDiscountAmountCents };
+        } else {
+          this.sqlRun(
+            `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
+            [cartId],
+          );
+        }
+      }
+
+      return {
+        cart: {
+          id: cart.id as string,
+          customer_email: cart.customer_email as string,
+          currency: cart.currency as string,
+          discount_id: cart.discount_id as string | null,
+          discount_amount_cents: finalDiscountAmountCents,
+          expires_at: cart.expires_at as string,
+        },
+        items: items.map((item) => ({
+          sku: item.sku as string,
+          title: item.title as string,
+          qty: item.qty as number,
+          unit_price_cents: item.unit_price_cents as number,
+        })),
+        discount: discountObj,
+        subtotal_cents: subtotalCents,
+      };
+    }) as CheckoutReadyPayload | DomainError;
+  }
+
+  /**
+   * Revert a cart from checked_out back to open.
+   * Optionally decrements discount usage_count if it was reserved.
+   */
+  cartRevertCheckout(cartId: string, releaseDiscountId?: string): void {
+    this.ensureInitialized();
+
+    this.ctx.storage.transactionSync(() => {
+      this.sqlRun(`UPDATE carts SET status = 'open', updated_at = ? WHERE id = ?`, [now(), cartId]);
+      if (releaseDiscountId) {
+        this.sqlRun(
+          `UPDATE discounts SET usage_count = MAX(usage_count - 1, 0), updated_at = ? WHERE id = ?`,
+          [now(), releaseDiscountId],
+        );
+      }
+    });
+  }
+
+  /**
+   * Finalize order from a completed Stripe checkout session.
+   * Everything from customer upsert through order insert, order_items,
+   * discount_usage recording, inventory decrement + logs, cart status flip.
+   * Broadcasts inventory.updated after commit.
+   */
+  finalizeOrderFromCart(args: FinalizeOrderArgs): FinalizeOrderResult | DomainError {
+    this.ensureInitialized();
+
+    const {
+      cartId,
+      stripeSessionId,
+      stripePaymentIntent,
+      customerEmail,
+      shippingName,
+      shippingPhone,
+      shippingAddress,
+      subtotalCents,
+      taxCents,
+      shippingCents,
+      totalCents,
+      currency,
+      discountId,
+      discountCode,
+      discountAmountCents,
+    } = args;
+
+    const skuAvailability: Array<{ sku: string; available: number }> = [];
+    let orderId = '';
+    let orderNumber = '';
+    let customerId = '';
+    let orderItemsResult: OrderItemPayload[] = [];
+
+    this.ctx.storage.transactionSync(() => {
+      const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
+        cartId,
+      ]);
+      if (!cart) return;
+
+      const items = this.sqlQuery<{
+        sku: string;
+        title: string;
+        qty: number;
+        unit_price_cents: number;
+      }>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
+
+      // Upsert customer
+      const [existingCustomer] = this.sqlQuery<{
+        id: string;
+        order_count: number;
+        total_spent_cents: number;
+      }>(`SELECT id, order_count, total_spent_cents FROM customers WHERE email = ?`, [
+        customerEmail,
+      ]);
+
+      const timestamp = now();
+
+      if (existingCustomer) {
+        customerId = existingCustomer.id;
+        this.sqlRun(
+          `UPDATE customers SET
+            name = COALESCE(?, name),
+            phone = COALESCE(?, phone),
+            order_count = order_count + 1,
+            total_spent_cents = total_spent_cents + ?,
+            last_order_at = ?,
+            updated_at = ?
+          WHERE id = ?`,
+          [shippingName, shippingPhone, totalCents, timestamp, timestamp, customerId],
+        );
+      } else {
+        customerId = uuid();
+        this.sqlRun(
+          `INSERT INTO customers (id, email, name, phone, order_count, total_spent_cents, last_order_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?)`,
+          [customerId, customerEmail, shippingName, shippingPhone, totalCents, timestamp],
+        );
+      }
+
+      // Save shipping address if provided
+      if (shippingAddress && customerId) {
+        const [existingAddress] = this.sqlQuery<{ id: string }>(
+          `SELECT id FROM customer_addresses WHERE customer_id = ? AND line1 = ? AND postal_code = ?`,
+          [customerId, shippingAddress.line1 as string, shippingAddress.postal_code as string],
+        );
+
+        if (!existingAddress) {
+          const [addressCount] = this.sqlQuery<{ count: number }>(
+            `SELECT COUNT(*) as count FROM customer_addresses WHERE customer_id = ?`,
+            [customerId],
+          );
+          const isDefault = addressCount.count === 0 ? 1 : 0;
+
+          this.sqlRun(
+            `INSERT INTO customer_addresses (id, customer_id, is_default, name, line1, line2, city, state, postal_code, country, phone)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              uuid(),
+              customerId,
+              isDefault,
+              shippingName,
+              shippingAddress.line1 as string,
+              (shippingAddress.line2 as string) || null,
+              shippingAddress.city as string,
+              shippingAddress.state as string,
+              shippingAddress.postal_code as string,
+              shippingAddress.country as string,
+              shippingPhone,
+            ],
+          );
+        }
+      }
+
+      // Create order
+      orderId = uuid();
+      orderNumber = generateOrderNumber();
+
+      this.sqlRun(
+        `INSERT INTO orders (id, customer_id, number, status, customer_email,
+         shipping_name, shipping_phone, ship_to,
+         subtotal_cents, tax_cents, shipping_cents, total_cents, currency,
+         discount_code, discount_id, discount_amount_cents,
+         stripe_checkout_session_id, stripe_payment_intent_id)
+         VALUES (?, ?, ?, 'paid', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          orderId,
+          customerId,
+          orderNumber,
+          customerEmail,
+          shippingName,
+          shippingPhone,
+          shippingAddress ? JSON.stringify(shippingAddress) : null,
+          subtotalCents,
+          taxCents,
+          shippingCents,
+          totalCents,
+          currency,
+          discountCode,
+          discountId,
+          discountAmountCents,
+          stripeSessionId,
+          stripePaymentIntent,
+        ],
+      );
+
+      // Track discount usage
+      if (discountId && discountAmountCents > 0) {
+        const [existingUsage] = this.sqlQuery<{ id: string }>(
+          `SELECT id FROM discount_usage WHERE order_id = ? AND discount_id = ?`,
+          [orderId, discountId],
+        );
+
+        if (!existingUsage) {
+          const [discountRow] = this.sqlQuery<{ usage_limit_per_customer: number | null }>(
+            `SELECT usage_limit_per_customer FROM discounts WHERE id = ?`,
+            [discountId],
+          );
+
+          if (discountRow?.usage_limit_per_customer !== null) {
+            const usageId = uuid();
+            const customerEmailLower = customerEmail.toLowerCase();
+            const result = this.sqlRun(
+              `INSERT INTO discount_usage (id, discount_id, order_id, customer_email, discount_amount_cents)
+               SELECT ?, ?, ?, ?, ?
+               WHERE (
+                 SELECT COUNT(*) FROM discount_usage
+                 WHERE discount_id = ? AND customer_email = ?
+               ) < ?`,
+              [
+                usageId,
+                discountId,
+                orderId,
+                customerEmailLower,
+                discountAmountCents,
+                discountId,
+                customerEmailLower,
+                discountRow.usage_limit_per_customer,
+              ],
+            );
+
+            if (result.changes === 0) {
+              console.warn(
+                `Discount usage limit exceeded for customer ${customerEmailLower} and discount ${discountId}, ` +
+                  `but order ${orderId} already created (payment succeeded).`,
+              );
+            }
+          } else {
+            this.sqlRun(
+              `INSERT INTO discount_usage (id, discount_id, order_id, customer_email, discount_amount_cents)
+               VALUES (?, ?, ?, ?, ?)`,
+              [uuid(), discountId, orderId, customerEmail.toLowerCase(), discountAmountCents],
+            );
+          }
+        }
+      }
+
+      // Create order items, decrement inventory
+      orderItemsResult = items;
+      for (const item of items) {
+        this.sqlRun(
+          `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents],
+        );
+
+        this.sqlRun(
+          `UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`,
+          [item.qty, item.qty, now(), item.sku],
+        );
+
+        this.sqlRun(
+          `INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, 'sale')`,
+          [uuid(), item.sku, -item.qty],
+        );
+      }
+
+      // Flip cart to expired
+      this.sqlRun(`UPDATE carts SET status = 'expired', updated_at = ? WHERE id = ?`, [
+        now(),
+        cartId,
+      ]);
+
+      // Collect availability for broadcast (after inventory updates)
+      for (const item of items) {
+        const [inv] = this.sqlQuery<{ on_hand: number; reserved: number }>(
+          `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
+          [item.sku],
+        );
+        skuAvailability.push({
+          sku: item.sku,
+          available: inv ? Math.max(0, inv.on_hand - inv.reserved) : 0,
+        });
+      }
+    });
+
+    // Broadcast inventory updates after commit
+    for (const { sku, available } of skuAvailability) {
+      this.broadcast({
+        type: 'inventory.updated',
+        data: { sku, available },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return {
+      ok: true,
+      orderId,
+      orderNumber,
+      customerId,
+      items: orderItemsResult,
+      skuAvailability,
+    };
+  }
+
+  /**
+   * Create a test order (no Stripe payment).
+   * Validates SKUs, checks inventory, applies discount atomically.
+   */
+  createTestOrder(args: TestOrderArgs): TestOrderResult | DomainError {
+    this.ensureInitialized();
+
+    const { customerEmail, items: inputItems, discountCode } = args;
+
+    let subtotal = 0;
+    const orderItems: OrderItemPayload[] = [];
+    let discountId: string | null = null;
+    let finalDiscountCode: string | null = null;
+    let discountAmountCents = 0;
+
+    return this.ctx.storage.transactionSync(() => {
+      // Validate items and compute subtotal
+      for (const { sku, qty } of inputItems) {
+        const [variant] = this.sqlQuery<{ title: string; price_cents: number; status: string }>(
+          `SELECT title, price_cents, status FROM variants WHERE sku = ?`,
+          [sku],
+        );
+        if (!variant)
+          return {
+            ok: false,
+            code: 'sku_not_found' as const,
+            message: `SKU not found: ${sku}`,
+            details: { sku },
+          };
+
+        const [inv] = this.sqlQuery<{ on_hand: number; reserved: number }>(
+          `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
+          [sku],
+        );
+        const available = (inv?.on_hand ?? 0) - (inv?.reserved ?? 0);
+        if (available < qty) {
+          return {
+            ok: false,
+            code: 'insufficient_inventory' as const,
+            message: `Insufficient inventory for SKU: ${sku}`,
+            details: { sku },
+          };
+        }
+
+        subtotal += variant.price_cents * qty;
+        orderItems.push({ sku, title: variant.title, qty, unit_price_cents: variant.price_cents });
+      }
+
+      // Validate and reserve discount
+      if (discountCode) {
+        const normalizedCode = discountCode.toUpperCase().trim();
+        const [discountRow] = this.sqlQuery<Record<string, unknown>>(
+          `SELECT * FROM discounts WHERE code = ?`,
+          [normalizedCode],
+        );
+
+        if (!discountRow) {
+          return {
+            ok: false,
+            code: 'discount_invalid' as const,
+            message: 'Discount code not found',
+          };
+        }
+
+        const discount = discountRow as unknown as Discount;
+
+        try {
+          validateDiscountFields(discount, subtotal);
+        } catch (err) {
+          return {
+            ok: false,
+            code: 'discount_invalid' as const,
+            message: err instanceof Error ? err.message : 'Discount is no longer valid',
+          };
+        }
+
+        if (discount.usage_limit_per_customer !== null) {
+          const [usage] = this.sqlQuery<{ count: number }>(
+            `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
+            [discount.id, customerEmail.toLowerCase()],
+          );
+          if (usage && usage.count >= discount.usage_limit_per_customer) {
+            return {
+              ok: false,
+              code: 'discount_invalid' as const,
+              message: 'You have already used this discount',
+            };
+          }
+        }
+
+        const currentTime = now();
+
+        if (discount.usage_limit !== null) {
+          const result = this.sqlRun(
+            `UPDATE discounts
+             SET usage_count = usage_count + 1, updated_at = ?
+             WHERE id = ?
+               AND status = 'active'
+               AND (starts_at IS NULL OR starts_at <= ?)
+               AND (expires_at IS NULL OR expires_at >= ?)
+               AND usage_count < usage_limit`,
+            [currentTime, discount.id, currentTime, currentTime],
+          );
+          if (result.changes === 0) {
+            return {
+              ok: false,
+              code: 'discount_invalid' as const,
+              message: 'Discount usage limit reached',
+            };
+          }
+        } else {
+          const result = this.sqlRun(
+            `UPDATE discounts
+             SET updated_at = ?
+             WHERE id = ?
+               AND status = 'active'
+               AND (starts_at IS NULL OR starts_at <= ?)
+               AND (expires_at IS NULL OR expires_at >= ?)`,
+            [currentTime, discount.id, currentTime, currentTime],
+          );
+          if (result.changes === 0) {
+            return {
+              ok: false,
+              code: 'discount_invalid' as const,
+              message: 'Discount is no longer valid',
+            };
+          }
+        }
+
+        discountAmountCents = calculateDiscount(discount, subtotal);
+        discountId = discount.id;
+        finalDiscountCode = discount.code;
+      }
+
+      const totalCents = subtotal - discountAmountCents;
+      const timestamp = now();
+
+      // Upsert customer
+      const [existingCustomer] = this.sqlQuery<{ id: string }>(
+        `SELECT id FROM customers WHERE email = ?`,
+        [customerEmail],
+      );
+
+      let customerId: string;
+      if (existingCustomer) {
+        customerId = existingCustomer.id;
+        this.sqlRun(
+          `UPDATE customers SET
+            order_count = order_count + 1,
+            total_spent_cents = total_spent_cents + ?,
+            last_order_at = ?,
+            updated_at = ?
+          WHERE id = ?`,
+          [totalCents, timestamp, timestamp, customerId],
+        );
+      } else {
+        customerId = uuid();
+        this.sqlRun(
+          `INSERT INTO customers (id, email, order_count, total_spent_cents, last_order_at)
+           VALUES (?, ?, 1, ?, ?)`,
+          [customerId, customerEmail, totalCents, timestamp],
+        );
+      }
+
+      const orderNumber = generateOrderNumber();
+      const orderId = uuid();
+
+      this.sqlRun(
+        `INSERT INTO orders (id, customer_id, number, status, customer_email, subtotal_cents, tax_cents, shipping_cents, total_cents, discount_code, discount_id, discount_amount_cents, created_at)
+         VALUES (?, ?, ?, 'paid', ?, ?, 0, 0, ?, ?, ?, ?, ?)`,
+        [
+          orderId,
+          customerId,
+          orderNumber,
+          customerEmail,
+          subtotal,
+          totalCents,
+          finalDiscountCode,
+          discountId,
+          discountAmountCents,
+          timestamp,
+        ],
+      );
+
+      for (const item of orderItems) {
+        this.sqlRun(
+          `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents],
+        );
+        this.sqlRun(
+          `UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`,
+          [item.qty, item.qty, timestamp, item.sku],
+        );
+      }
+
+      if (discountId && discountAmountCents > 0) {
+        const [existingUsage] = this.sqlQuery<{ id: string }>(
+          `SELECT id FROM discount_usage WHERE order_id = ? AND discount_id = ?`,
+          [orderId, discountId],
+        );
+        if (!existingUsage) {
+          this.sqlRun(
+            `INSERT INTO discount_usage (id, discount_id, order_id, customer_email, discount_amount_cents)
+             VALUES (?, ?, ?, ?, ?)`,
+            [uuid(), discountId, orderId, customerEmail.toLowerCase(), discountAmountCents],
+          );
+        }
+      }
+
+      return {
+        ok: true as const,
+        order: {
+          id: orderId,
+          number: orderNumber,
+          status: 'paid',
+          customer_email: customerEmail,
+          customer_id: customerId,
+          subtotal_cents: subtotal,
+          discount_amount_cents: discountAmountCents,
+          tax_cents: 0,
+          shipping_cents: 0,
+          total_cents: totalCents,
+          discount_code: finalDiscountCode,
+          discount_id: discountId,
+          currency: 'USD',
+          created_at: timestamp,
+          shipping_name: null,
+          shipping_phone: null,
+          ship_to: null,
+          tracking_number: null,
+          tracking_url: null,
+          shipped_at: null,
+          stripe_checkout_session_id: null,
+          stripe_payment_intent_id: null,
+        },
+        items: orderItems,
+      };
+    }) as TestOrderResult | DomainError;
+  }
+
+  /**
+   * Delete a product and all its variants/images/inventory atomically,
+   * after checking that no variants have been ordered.
+   */
+  deleteProductCascade(productId: string): { ok: true } | DomainError {
+    this.ensureInitialized();
+
+    return this.ctx.storage.transactionSync(() => {
+      const [product] = this.sqlQuery<{ id: string }>(`SELECT id FROM products WHERE id = ?`, [
+        productId,
+      ]);
+      if (!product) {
+        return { ok: false, code: 'product_not_found' as const, message: 'Product not found' };
+      }
+
+      const variants = this.sqlQuery<{ sku: string }>(
+        `SELECT sku FROM variants WHERE product_id = ?`,
+        [productId],
+      );
+
+      if (variants.length > 0) {
+        const skus = variants.map((v) => v.sku);
+        const placeholders = skus.map(() => '?').join(',');
+        const [orderItem] = this.sqlQuery<{ id: string }>(
+          `SELECT id FROM order_items WHERE sku IN (${placeholders}) LIMIT 1`,
+          skus,
+        );
+
+        if (orderItem) {
+          return {
+            ok: false,
+            code: 'product_has_orders' as const,
+            message:
+              'Cannot delete product with variants that have been ordered. Set status to draft instead.',
+          };
+        }
+
+        for (const v of variants) {
+          this.sqlRun(`DELETE FROM inventory WHERE sku = ?`, [v.sku]);
+        }
+      }
+
+      this.sqlRun(`DELETE FROM product_images WHERE product_id = ?`, [productId]);
+      this.sqlRun(`DELETE FROM variants WHERE product_id = ?`, [productId]);
+      this.sqlRun(`DELETE FROM products WHERE id = ?`, [productId]);
+
+      return { ok: true as const };
+    }) as { ok: true } | DomainError;
+  }
+
+  // ─── WebSocket Infrastructure ───────────────────────────────────────────────
+
   private broadcastPresenceCount(productId: string): void {
     const topic = `presence.product.${productId}`;
     let count = 0;
@@ -551,11 +1792,11 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
   async cleanupExpiredCarts(): Promise<number> {
     this.ensureInitialized();
 
-    const now = new Date().toISOString();
+    const now_ = new Date().toISOString();
 
     const expiredCarts = this.query<{ id: string }>(
       `SELECT id FROM carts WHERE status = 'open' AND expires_at < ?`,
-      [now],
+      [now_],
     );
 
     if (expiredCarts.length === 0) return 0;
@@ -568,24 +1809,17 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       cartIds,
     );
 
-    try {
-      this.sql.exec('BEGIN');
-
+    this.ctx.storage.transactionSync(() => {
       for (const item of reservedItems) {
-        this.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [
+        this.sqlRun(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [
           item.qty,
           item.sku,
         ]);
       }
 
-      this.run(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
-      this.run(`DELETE FROM cart_items WHERE cart_id IN (${placeholders})`, cartIds);
-
-      this.sql.exec('COMMIT');
-    } catch (e) {
-      this.sql.exec('ROLLBACK');
-      throw e;
-    }
+      this.sqlRun(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
+      this.sqlRun(`DELETE FROM cart_items WHERE cart_id IN (${placeholders})`, cartIds);
+    });
 
     // Broadcast inventory updates for each affected SKU
     for (const item of reservedItems) {
