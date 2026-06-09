@@ -1,5 +1,6 @@
-import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
+import { createRoute } from '@hono/zod-openapi';
 import { getDb } from '../db';
+import { createApp } from '../lib/app';
 import { generateWebhookSecret, retryDelivery } from '../lib/webhooks';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
@@ -17,7 +18,7 @@ import {
   WebhookResponse,
   WebhookWithSecret,
 } from '../schemas';
-import { ApiError, type HonoEnv, now, uuid } from '../types';
+import { ApiError, now, uuid } from '../types';
 
 const VALID_EVENTS = [
   'order.created',
@@ -29,7 +30,7 @@ const VALID_EVENTS = [
   '*',
 ] as const;
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 app.use('*', authMiddleware);
 

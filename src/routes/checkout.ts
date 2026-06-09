@@ -1,7 +1,8 @@
-import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { createRoute, z } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { getDb } from '../db';
 import type { CartPayload, CheckoutReadyPayload, DomainError } from '../do';
+import { createApp } from '../lib/app';
 import { getStripe } from '../lib/stripe';
 import { authMiddleware } from '../middleware/auth';
 import {
@@ -17,7 +18,7 @@ import {
   CreateCartBody,
   ErrorResponse,
 } from '../schemas';
-import { ApiError, type HonoEnv, isValidEmail, now, uuid } from '../types';
+import { ApiError, isValidEmail, now, uuid } from '../types';
 import { calculateDiscount, type Discount, validateDiscount } from './discounts';
 
 const RemoveDiscountResponse = z
@@ -27,7 +28,7 @@ const RemoveDiscountResponse = z
   })
   .openapi('RemoveDiscountResponse');
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 app.use('*', authMiddleware);
 

@@ -1,10 +1,11 @@
-import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { createRoute, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
+import { createApp } from '../lib/app';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import { ErrorResponse, OkResponse, SetupStripeBody } from '../schemas';
-import { ApiError, type HonoEnv, now } from '../types';
+import { ApiError, now } from '../types';
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 const InitKeysBody = z
   .object({

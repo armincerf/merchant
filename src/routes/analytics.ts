@@ -1,9 +1,10 @@
-import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { createRoute, z } from '@hono/zod-openapi';
 import { type Database, getDb } from '../db';
+import { createApp } from '../lib/app';
 import { isBot } from '../lib/bot-detect';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import { ErrorResponse } from '../schemas';
-import { type HonoEnv, now, uuid } from '../types';
+import { now, uuid } from '../types';
 
 // ============================================================
 // SCHEMAS
@@ -69,7 +70,7 @@ function parseDeviceType(userAgent: string | undefined | null): 'mobile' | 'tabl
 // ROUTES
 // ============================================================
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 // Auth required - but pk_ (public) keys are sufficient
 app.use('*', authMiddleware);

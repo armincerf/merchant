@@ -1,5 +1,6 @@
-import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { createRoute, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
+import { createApp } from '../lib/app';
 import { checkLowInventory } from '../lib/webhooks';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
@@ -11,9 +12,9 @@ import {
   InventoryQuery,
   SkuParam,
 } from '../schemas';
-import { ApiError, type HonoEnv, now, uuid } from '../types';
+import { ApiError, now, uuid } from '../types';
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 // Public endpoint — no auth required
 const getAvailability = createRoute({

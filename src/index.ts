@@ -16,7 +16,7 @@ import { setup } from './routes/setup';
 import { ucp } from './routes/ucp';
 import { webhooks } from './routes/webhooks';
 import { webhooksRoutes } from './routes/webhooks-outbound';
-import { ApiError, type DOStub, type Env } from './types';
+import { ApiError, type DOStub, type Env, VERSION } from './types';
 
 export { MerchantDO };
 
@@ -57,7 +57,7 @@ app.onError((err, c) => {
   return c.json({ error: { code: 'internal', message: 'Internal server error' } }, 500);
 });
 
-app.get('/', (c) => c.json({ name: 'merchant', version: '0.1.0', ok: true }));
+app.get('/', (c) => c.json({ name: 'merchant', version: VERSION, ok: true }));
 
 app.route('/v1/setup', setup);
 app.route('/v1/products', catalog);
@@ -74,12 +74,21 @@ app.route('/oauth', oauth);
 app.route('', oauth);
 app.route('', ucp);
 
+app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
+  type: 'http',
+  scheme: 'bearer',
+});
+
 app.doc('/openapi.json', {
   openapi: '3.0.0',
   info: {
     title: 'Merchant API',
-    version: '1.0.0',
-    description: 'The open-source commerce backend for Cloudflare + Stripe',
+    version: VERSION,
+    description:
+      'The open-source commerce backend for Cloudflare + Stripe. ' +
+      'OAuth 2.0 + PKCE endpoints under /oauth. ' +
+      'UCP endpoints under /ucp/v1. ' +
+      'Stripe webhook receiver at /v1/webhooks/stripe.',
   },
   servers: [{ url: '/' }],
 });

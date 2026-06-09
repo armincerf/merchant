@@ -1,13 +1,14 @@
-import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { createRoute, z } from '@hono/zod-openapi';
+import { createApp } from '../lib/app';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import { ErrorResponse, ImageUploadResponse, OkResponse } from '../schemas';
-import { ApiError, type HonoEnv, uuid } from '../types';
+import { ApiError, uuid } from '../types';
 
 const ImageKeyParam = z.object({
   key: z.string().openapi({ param: { name: 'key', in: 'path' }, example: 'abc123.jpg' }),
 });
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 const uploadImage = createRoute({
   method: 'post',

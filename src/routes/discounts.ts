@@ -1,6 +1,7 @@
-import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
+import { createRoute } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { type Database, getDb } from '../db';
+import { createApp } from '../lib/app';
 import { type Discount as _Discount, validateDiscountFields } from '../lib/discounts';
 import { parseCompositeCursor } from '../lib/pagination';
 import { getStripe } from '../lib/stripe';
@@ -15,7 +16,7 @@ import {
   PaginationQuery,
   UpdateDiscountBody,
 } from '../schemas';
-import { ApiError, type HonoEnv, now, uuid } from '../types';
+import { ApiError, now, uuid } from '../types';
 
 // Re-export shared types and pure functions for backward-compat with checkout.ts / orders.ts
 export type { Discount } from '../lib/discounts';
@@ -135,7 +136,7 @@ async function syncDiscountToStripe(
   }
 }
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 app.use('*', authMiddleware);
 

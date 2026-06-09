@@ -108,6 +108,8 @@ export class ApiError extends Error {
   }
 }
 
+export const VERSION = '0.1.0';
+
 export function uuid(): string {
   return crypto.randomUUID();
 }

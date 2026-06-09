@@ -1,5 +1,6 @@
-import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { createRoute, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
+import { createApp } from '../lib/app';
 import { parseCompositeCursor } from '../lib/pagination';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
@@ -16,7 +17,7 @@ import {
   PaginationQuery,
   UpdateCustomerBody,
 } from '../schemas';
-import { ApiError, type HonoEnv, now } from '../types';
+import { ApiError, now } from '../types';
 
 const CustomerOrdersQuery = PaginationQuery;
 
@@ -66,7 +67,7 @@ const CustomerOrdersResponse = z
   })
   .openapi('CustomerOrdersList');
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 app.use('*', authMiddleware);
 

@@ -1,5 +1,6 @@
-import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
+import { createRoute } from '@hono/zod-openapi';
 import { getDb } from '../db';
+import { createApp } from '../lib/app';
 import { parseCompositeCursor } from '../lib/pagination';
 import { getStripe } from '../lib/stripe';
 import { dispatchWebhooks, type WebhookEventType } from '../lib/webhooks';
@@ -15,9 +16,9 @@ import {
   RefundResponse,
   UpdateOrderBody,
 } from '../schemas';
-import { ApiError, type HonoEnv, now, uuid } from '../types';
+import { ApiError, now, uuid } from '../types';
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 app.use('*', authMiddleware);
 

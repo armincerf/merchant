@@ -1,5 +1,6 @@
-import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { createRoute, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
+import { createApp } from '../lib/app';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
   CreateProductBody,
@@ -15,7 +16,7 @@ import {
   UpdateVariantBody,
   VariantResponse,
 } from '../schemas';
-import { ApiError, type HonoEnv, now, uuid } from '../types';
+import { ApiError, now, uuid } from '../types';
 
 function slugify(text: string): string {
   return text
@@ -37,7 +38,7 @@ const VariantIdParam = z.object({
     .openapi({ param: { name: 'variantId', in: 'path' } }),
 });
 
-const app = new OpenAPIHono<HonoEnv>();
+const app = createApp();
 
 app.use('*', authMiddleware);
 
