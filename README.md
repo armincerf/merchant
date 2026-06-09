@@ -410,10 +410,28 @@ Features:
 
 ## Real-time Updates (WebSocket)
 
-Connect to the WebSocket endpoint for live updates:
+WebSocket connections are authenticated via an API key supplied either as the `Authorization: Bearer <key>` header (server-to-server) or the `?key=<key>` query param (browsers, which cannot set custom headers on WS connections).
+
+**Public topics** (no key required, or any valid `pk_…` key):
+
+- `inventory` / `inventory.updated` — live stock-level changes
+- `presence.product.<id>` — live viewer count for a product page
+
+**Admin topics** (require a valid `sk_…` admin key):
+
+- `order`, `order.*` — order created / updated / shipped / refunded (contains customer PII)
+- `cart`, `cart.*` — cart updated / checked out
+- `inventory.low` — low-stock alerts
+- `*` — all events
+
+Disallowed topics are silently dropped at connection time and when subscribing dynamically. Non-admin sockets never receive order or cart events even if they somehow hold the topic (enforced at broadcast time as defence-in-depth).
 
 ```javascript
-const ws = new WebSocket('wss://your-store.com/ws?topics=cart,order,inventory');
+// Public connection (inventory + presence only)
+const ws = new WebSocket('wss://your-store.com/?topics=inventory,presence.product.prod_123&key=pk_...');
+
+// Admin connection (all events)
+const ws = new WebSocket('wss://your-store.com/?topics=*&key=sk_...');
 
 ws.onmessage = (event) => {
   const { type, data, timestamp } = JSON.parse(event.data);
@@ -422,12 +440,10 @@ ws.onmessage = (event) => {
 
 // Subscribe/unsubscribe dynamically
 ws.send(JSON.stringify({ action: 'subscribe', topic: 'order' }));
-ws.send(JSON.stringify({ action: 'unsubscribe', topic: 'cart' }));
+ws.send(JSON.stringify({ action: 'unsubscribe', topic: 'inventory' }));
 ```
 
 **Event types:** `cart.updated`, `cart.checked_out`, `order.created`, `order.updated`, `order.shipped`, `order.refunded`, `inventory.updated`, `inventory.low`
-
-**Topics:** `cart`, `order`, `inventory`, or `*` for all events.
 
 ## Architecture
 

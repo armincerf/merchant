@@ -90,7 +90,30 @@ export default {
     if (request.headers.get('Upgrade') === 'websocket') {
       const id = env.MERCHANT.idFromName('default');
       const stub = env.MERCHANT.get(id);
-      return stub.fetch(request);
+
+      // Extract the API key from the Authorization Bearer header OR the ?key= query param
+      // (browsers cannot set custom headers on WebSocket connections, so ?key= is the browser path).
+      const url = new URL(request.url);
+      const bearerKey = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? null;
+      const queryKey = url.searchParams.get('key');
+      const rawKey = bearerKey ?? queryKey ?? null;
+
+      // Forward the key to the DO in a controlled internal header.
+      // We must overwrite any client-supplied X-WS-Key to prevent spoofing.
+      const forwardHeaders = new Headers(request.headers);
+      if (rawKey !== null) {
+        forwardHeaders.set('X-WS-Key', rawKey);
+      } else {
+        forwardHeaders.delete('X-WS-Key');
+      }
+
+      const forwardRequest = new Request(request.url, {
+        method: request.method,
+        headers: forwardHeaders,
+        body: request.body,
+      });
+
+      return stub.fetch(forwardRequest);
     }
     return app.fetch(request, env, ctx);
   },

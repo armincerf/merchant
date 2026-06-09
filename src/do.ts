@@ -519,7 +519,8 @@ CREATE INDEX IF NOT EXISTS idx_analytics_events_page_created ON analytics_events
 
 export class MerchantDO extends DurableObject<MerchantEnv> {
   private sql: SqlStorage;
-  private sessions: Map<WebSocket, { topics: Set<string> }> = new Map();
+  private sessions: Map<WebSocket, { topics: Set<string>; role: 'admin' | 'public' | 'anon' }> =
+    new Map();
   private initialized = false;
 
   constructor(ctx: DurableObjectState, env: MerchantEnv) {
@@ -544,7 +545,7 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     const url = new URL(request.url);
 
     if (request.headers.get('Upgrade') === 'websocket') {
-      return this.handleWebSocketUpgrade(request);
+      return await this.handleWebSocketUpgrade(request);
     }
 
     if (url.pathname === '/health') {
@@ -1677,6 +1678,51 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     }) as { ok: true } | DomainError;
   }
 
+  // ─── WebSocket Authorization ────────────────────────────────────────────────
+
+  /**
+   * Determine WS role from a raw key forwarded via the internal X-WS-Key header.
+   * Returns 'admin', 'public', or 'anon' (no/invalid key).
+   */
+  private async resolveWsRole(rawKey: string | null): Promise<'admin' | 'public' | 'anon'> {
+    if (!rawKey) return 'anon';
+    const data = new TextEncoder().encode(rawKey);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const keyHash = Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const rows = this.sqlQuery<{ role: string }>(
+      `SELECT role FROM api_keys WHERE key_hash = ? LIMIT 1`,
+      [keyHash],
+    );
+    if (rows.length === 0) return 'anon';
+    return rows[0].role === 'admin' ? 'admin' : 'public';
+  }
+
+  /**
+   * Return true if an event type is publicly deliverable (no auth required).
+   */
+  private static isPublicEvent(eventType: string): boolean {
+    return eventType === 'inventory.updated' || eventType === 'presence.count';
+  }
+
+  /**
+   * Filter requested topics to those permitted for the given role.
+   * Public / anon: only inventory.updated (via 'inventory' or exact) and presence.product.*.
+   * Admin: all topics.
+   */
+  private static filterTopicsForRole(
+    topics: string[],
+    role: 'admin' | 'public' | 'anon',
+  ): string[] {
+    if (role === 'admin') return topics;
+    return topics.filter((t) => {
+      // Allow exact inventory.updated, bare 'inventory' prefix (maps to inventory.updated events),
+      // and presence.product.* pattern
+      return t === 'inventory.updated' || t === 'inventory' || t.startsWith('presence.product.');
+    });
+  }
+
   // ─── WebSocket Infrastructure ───────────────────────────────────────────────
 
   private broadcastPresenceCount(productId: string): void {
@@ -1701,18 +1747,26 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     }
   }
 
-  private handleWebSocketUpgrade(request: Request): Response {
+  private async handleWebSocketUpgrade(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const topics = url.searchParams.get('topics')?.split(',') || ['*'];
+    const rawTopics = url.searchParams.get('topics')?.split(',') || ['*'];
+
+    // Resolve role from the internal forwarding header (set by the worker fetch handler).
+    // Client-supplied X-WS-Key values are overwritten by the worker, so we trust this header.
+    const rawKey = request.headers.get('X-WS-Key');
+    const role = await this.resolveWsRole(rawKey);
+
+    // Filter topics down to those allowed for this role
+    const allowedTopics = MerchantDO.filterTopicsForRole(rawTopics, role);
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
     this.ctx.acceptWebSocket(server);
-    this.sessions.set(server, { topics: new Set(topics) });
-    server.serializeAttachment({ topics: Array.from(topics) });
+    this.sessions.set(server, { topics: new Set(allowedTopics), role });
+    server.serializeAttachment({ topics: allowedTopics, role });
 
-    for (const topic of topics) {
+    for (const topic of allowedTopics) {
       const match = topic.match(/^presence\.product\.(.+)$/);
       if (match) this.broadcastPresenceCount(match[1]);
     }
@@ -1725,9 +1779,12 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       const data = JSON.parse(message as string);
       let session = this.sessions.get(ws);
       if (!session) {
-        const attachment = ws.deserializeAttachment() as { topics: string[] } | null;
+        const attachment = ws.deserializeAttachment() as {
+          topics: string[];
+          role?: 'admin' | 'public' | 'anon';
+        } | null;
         if (attachment) {
-          session = { topics: new Set(attachment.topics) };
+          session = { topics: new Set(attachment.topics), role: attachment.role ?? 'anon' };
           this.sessions.set(ws, session);
         } else {
           return;
@@ -1735,13 +1792,16 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       }
 
       if (data.action === 'subscribe' && data.topic) {
-        session.topics.add(data.topic);
-        ws.serializeAttachment({ topics: Array.from(session.topics) });
-        const match = data.topic.match(/^presence\.product\.(.+)$/);
+        // Enforce topic policy: silently drop disallowed topics
+        const [allowed] = MerchantDO.filterTopicsForRole([data.topic], session.role);
+        if (!allowed) return;
+        session.topics.add(allowed);
+        ws.serializeAttachment({ topics: Array.from(session.topics), role: session.role });
+        const match = allowed.match(/^presence\.product\.(.+)$/);
         if (match) this.broadcastPresenceCount(match[1]);
       } else if (data.action === 'unsubscribe' && data.topic) {
         session.topics.delete(data.topic);
-        ws.serializeAttachment({ topics: Array.from(session.topics) });
+        ws.serializeAttachment({ topics: Array.from(session.topics), role: session.role });
         const match = data.topic.match(/^presence\.product\.(.+)$/);
         if (match) this.broadcastPresenceCount(match[1]);
       }
@@ -1775,8 +1835,12 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
   broadcast(event: WSEvent): void {
     const message = JSON.stringify(event);
     const eventTopic = event.type.split('.')[0];
+    const isPublic = MerchantDO.isPublicEvent(event.type);
 
     for (const [ws, session] of this.sessions) {
+      // Defense-in-depth: non-admin sessions only receive public events
+      if (!isPublic && session.role !== 'admin') continue;
+
       if (
         session.topics.has('*') ||
         session.topics.has(eventTopic) ||
