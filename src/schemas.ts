@@ -724,6 +724,43 @@ export const RetryResponse = z
   .openapi('RetryResult');
 
 // ============================================================
+// API KEY SCHEMAS
+// ============================================================
+
+export const ApiKeyRole = z.enum(['public', 'admin']);
+
+export const ApiKeyResponse = z
+  .object({
+    id: z.string().uuid(),
+    key_prefix: z.string().openapi({ example: 'pk_a1b2c3...' }),
+    role: ApiKeyRole,
+    created_at: z.string().datetime(),
+  })
+  .openapi('ApiKey');
+
+export const ApiKeyListResponse = z
+  .object({
+    items: z.array(ApiKeyResponse),
+  })
+  .openapi('ApiKeyList');
+
+export const CreateApiKeyBody = z
+  .object({
+    role: ApiKeyRole.openapi({ example: 'public' }),
+  })
+  .openapi('CreateApiKey');
+
+export const CreateApiKeyResponse = z
+  .object({
+    id: z.string().uuid(),
+    key: z.string().openapi({ example: 'pk_a1b2c3d4e5f6...' }),
+    key_prefix: z.string().openapi({ example: 'pk_a1b2c3...' }),
+    role: ApiKeyRole,
+    created_at: z.string().datetime(),
+  })
+  .openapi('CreateApiKeyResult');
+
+// ============================================================
 // SETUP SCHEMAS
 // ============================================================
 

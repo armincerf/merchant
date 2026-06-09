@@ -205,6 +205,21 @@ POST /v1/setup/stripe
 {"stripe_secret_key": "sk_...", "stripe_webhook_secret": "whsec_..."}
 ```
 
+### API keys (admin)
+
+```bash
+# List all keys (id, key_prefix, role — never hashes)
+GET /v1/keys
+
+# Create a new key (full key shown once — save it immediately)
+POST /v1/keys
+{"role": "public"}   # or "admin"
+# Returns: {"id": "...", "key": "pk_a1b2c3...", "key_prefix": "pk_a1b2c3...", "role": "public", "created_at": "..."}
+
+# Revoke a key (refuses if it is the last admin key)
+DELETE /v1/keys/{id}
+```
+
 ### Outbound Webhooks (admin)
 
 ```bash
