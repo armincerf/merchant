@@ -2,6 +2,7 @@ import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { getDb } from '../db';
 import type { CartPayload, CheckoutReadyPayload, DomainError } from '../do';
+import { getStripe } from '../lib/stripe';
 import { authMiddleware } from '../middleware/auth';
 import {
   AddCartItemBody,
@@ -322,7 +323,7 @@ app.openapi(checkoutCart, async (c) => {
     }
   };
 
-  const stripe = new Stripe(stripeSecretKey);
+  const stripe = getStripe(stripeSecretKey);
 
   const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = items.map((item) => ({
     price_data: {

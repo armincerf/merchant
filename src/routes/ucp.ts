@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import Stripe from 'stripe';
 import { type Database, getDb } from '../db';
+import { getStripe } from '../lib/stripe';
 import { dispatchWebhooks } from '../lib/webhooks';
 import { authMiddleware, requireScope } from '../middleware/auth';
 import { ApiError, type HonoEnv, now, uuid } from '../types';
@@ -744,7 +745,7 @@ ucp.post('/ucp/v1/checkout-sessions/:id/complete', async (c) => {
   // For UCP, we use Stripe Checkout redirect flow
   // The payment_data should indicate the handler being used
   if (stripeConfig.secretKey && payment_data?.handler_id === 'stripe_checkout') {
-    const stripe = new Stripe(stripeConfig.secretKey);
+    const stripe = getStripe(stripeConfig.secretKey);
 
     // Create Stripe Checkout Session
     const stripeLineItems = lineItems.map((item: UCPLineItem) => ({

@@ -1,6 +1,7 @@
 import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
-import Stripe from 'stripe';
 import { getDb } from '../db';
+import { parseCompositeCursor } from '../lib/pagination';
+import { getStripe } from '../lib/stripe';
 import { dispatchWebhooks, type WebhookEventType } from '../lib/webhooks';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
@@ -56,7 +57,7 @@ app.openapi(listOrders, async (c) => {
   }
 
   if (cursor) {
-    const [cursorDate, cursorId] = cursor.split('|');
+    const { date: cursorDate, id: cursorId } = parseCompositeCursor(cursor);
     query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`;
     params.push(cursorDate, cursorDate, cursorId);
   }
@@ -258,7 +259,7 @@ app.openapi(refundOrder, async (c) => {
     throw ApiError.invalidRequest('Cannot refund test orders (no Stripe payment)');
   }
 
-  const stripe = new Stripe(stripeSecretKey);
+  const stripe = getStripe(stripeSecretKey);
 
   try {
     const refund = await stripe.refunds.create({

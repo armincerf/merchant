@@ -7,16 +7,9 @@
  *
  * Note: Stripe sync is skipped because no STRIPE_SECRET_KEY is set in test env.
  *
- * Rate-limit note: /v1/carts is limited to 30 req/min per API key.  However, the
- * rate-limit counter is shared across ALL paths for a given key — this is a source
- * bug (documented below). Tests are designed to stay within ~28 total requests to
- * avoid hitting the counter ceiling for the /v1/carts config.
- *
- * Source bug: In src/middleware/rate-limit.ts the counter key is
- * `${identifier}:${windowStart}` which is the same for ALL path configs that share
- * the same windowMs. This means that 30 requests to ANY endpoint (e.g. /v1/discounts
- * which has a 500/min admin limit) will exhaust the /v1/carts 30/min counter, blocking
- * cart operations even if they haven't been called before.
+ * Rate-limit note: Each endpoint config now gets its own counter scope
+ * (${identifier}:${scope}:${windowStart}), so requests to /v1/discounts no longer
+ * consume the /v1/carts budget.
  */
 
 import { runInDurableObject } from 'cloudflare:test';

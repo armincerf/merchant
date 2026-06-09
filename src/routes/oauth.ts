@@ -148,6 +148,16 @@ oauth.get('/authorize', async (c) => {
   let [client] = await db.query<any>(`SELECT * FROM oauth_clients WHERE client_id = ?`, [clientId]);
 
   if (!client) {
+    const MAX_OAUTH_CLIENTS = 1000;
+    const [countRow] = await db.query<{ 'COUNT(*)': number }>(
+      `SELECT COUNT(*) FROM oauth_clients`,
+      [],
+    );
+    const clientCount = countRow ? (countRow['COUNT(*)'] as number) : 0;
+    if (clientCount >= MAX_OAUTH_CLIENTS) {
+      throw ApiError.invalidRequest('Client registration limit reached');
+    }
+
     const domain = new URL(redirectUri).hostname;
 
     await db.run(

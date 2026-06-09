@@ -36,6 +36,7 @@ app.use('*', async (c, next) => {
 });
 
 app.use('/v1/*', rateLimitMiddleware());
+app.use('/oauth/*', rateLimitMiddleware());
 
 app.onError((err, c) => {
   console.error(err);

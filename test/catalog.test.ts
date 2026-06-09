@@ -95,6 +95,24 @@ describe('variant CRUD', () => {
     expect(inv.items[0].on_hand).toBe(0);
   });
 
+  it('returns 409 when PATCH /v1/products/:id uses a slug already taken by another product', async () => {
+    // Create a second product to take a known slug
+    const res1 = await authedFetch('/v1/products', seed.sk, {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Slug Conflict Target', slug: 'slug-conflict-target' }),
+    });
+    expect(res1.status).toBe(201);
+
+    // Try to update seed product to that slug
+    const res2 = await authedFetch(`/v1/products/${seed.productId}`, seed.sk, {
+      method: 'PATCH',
+      body: JSON.stringify({ slug: 'slug-conflict-target' }),
+    });
+    expect(res2.status).toBe(409);
+    const body = await jsonBody<{ error: { code: string } }>(res2);
+    expect(body.error.code).toBe('conflict');
+  });
+
   it('rejects duplicate SKU on variant create', async () => {
     const res = await authedFetch(`/v1/products/${seed.productId}/variants`, seed.sk, {
       method: 'POST',
@@ -136,5 +154,29 @@ describe('variant CRUD', () => {
     expect(delRes.status).toBe(200);
     const body = await jsonBody<{ deleted: boolean }>(delRes);
     expect(body.deleted).toBe(true);
+  });
+});
+
+describe('cursor validation', () => {
+  it('returns 400 for a malformed cursor on GET /v1/orders', async () => {
+    const res = await authedFetch('/v1/orders?cursor=notavalidcursor', seed.sk);
+    expect(res.status).toBe(400);
+    const body = await jsonBody<{ error: { code: string; message: string } }>(res);
+    expect(body.error.code).toBe('invalid_request');
+    expect(body.error.message).toContain('cursor');
+  });
+
+  it('returns 400 for a malformed cursor on GET /v1/customers', async () => {
+    const res = await authedFetch('/v1/customers?cursor=bad', seed.sk);
+    expect(res.status).toBe(400);
+    const body = await jsonBody<{ error: { code: string } }>(res);
+    expect(body.error.code).toBe('invalid_request');
+  });
+
+  it('returns 400 for a malformed cursor on GET /v1/discounts', async () => {
+    const res = await authedFetch('/v1/discounts?cursor=|||', seed.sk);
+    expect(res.status).toBe(400);
+    const body = await jsonBody<{ error: { code: string } }>(res);
+    expect(body.error.code).toBe('invalid_request');
   });
 });

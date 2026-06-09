@@ -294,6 +294,11 @@ app.openapi(updateProduct, async (c) => {
     params.push(body.title);
   }
   if (body.slug !== undefined) {
+    const [slugConflict] = await db.query<any>(
+      `SELECT id FROM products WHERE slug = ? AND id != ?`,
+      [body.slug, id],
+    );
+    if (slugConflict) throw ApiError.conflict(`Slug '${body.slug}' is already in use`);
     updates.push('slug = ?');
     params.push(body.slug);
   }

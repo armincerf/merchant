@@ -2,7 +2,7 @@
 // RATE LIMIT CONFIGURATION
 // ============================================================
 // Easy to update - just modify these values
-// Limits are per API key, per window
+// Limits are per API key (or IP), per window, per endpoint scope
 
 export type RateLimitConfig = {
   requests: number; // Max requests allowed
@@ -16,7 +16,10 @@ export const rateLimits = {
     windowMs: 60 * 1000, // 1 minute
   },
 
-  // Per role overrides
+  // Per-role overrides (RESERVED for future authenticated-stage use).
+  // Role detection based on unverified key prefixes (sk_/pk_) was removed
+  // because it allowed callers to claim a higher limit without authentication.
+  // These values are kept for reference but are NOT applied pre-auth.
   roles: {
     admin: {
       requests: 500,
@@ -31,6 +34,11 @@ export const rateLimits = {
   // Per endpoint overrides (path prefix -> config)
   // More specific paths take precedence
   endpoints: {
+    // OAuth endpoints — unlimited before, now capped
+    '/oauth': {
+      requests: 20,
+      windowMs: 60 * 1000,
+    },
     // Checkout is rate limited more strictly to prevent abuse
     '/v1/carts': {
       requests: 30,
@@ -61,20 +69,29 @@ export const rateLimits = {
   includeHeaders: true,
 } as const;
 
+export type LimitResult = {
+  config: RateLimitConfig;
+  /** Scope string used as part of the counter key to isolate per-endpoint budgets. */
+  scope: string;
+};
+
 // Helper to get limit for a specific request
-export function getLimitForRequest(path: string, role?: 'admin' | 'public'): RateLimitConfig {
-  // Check endpoint-specific overrides first
+export function getLimitForRequest(path: string): LimitResult {
+  // Check endpoint-specific overrides first (longest match wins)
+  let bestPrefix = '';
+  let bestConfig: RateLimitConfig | null = null;
+
   for (const [prefix, config] of Object.entries(rateLimits.endpoints)) {
-    if (path.startsWith(prefix)) {
-      return config;
+    if (path.startsWith(prefix) && prefix.length > bestPrefix.length) {
+      bestPrefix = prefix;
+      bestConfig = config;
     }
   }
 
-  // Check role-based limits
-  if (role && rateLimits.roles[role]) {
-    return rateLimits.roles[role];
+  if (bestConfig) {
+    return { config: bestConfig, scope: bestPrefix };
   }
 
   // Fall back to default
-  return rateLimits.default;
+  return { config: rateLimits.default, scope: 'default' };
 }

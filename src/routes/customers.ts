@@ -1,5 +1,6 @@
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
+import { parseCompositeCursor } from '../lib/pagination';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
   AddressIdParam,
@@ -95,12 +96,13 @@ app.openapi(listCustomers, async (c) => {
   const params: any[] = [];
 
   if (search) {
-    query += ` AND (email LIKE ? OR name LIKE ?)`;
-    params.push(`%${search}%`, `%${search}%`);
+    const escaped = search.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    query += ` AND (email LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')`;
+    params.push(`%${escaped}%`, `%${escaped}%`);
   }
 
   if (cursor) {
-    const [cursorDate, cursorId] = cursor.split('|');
+    const { date: cursorDate, id: cursorId } = parseCompositeCursor(cursor);
     query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`;
     params.push(cursorDate, cursorDate, cursorId);
   }
@@ -204,7 +206,7 @@ app.openapi(getCustomerOrders, async (c) => {
   const params: any[] = [id];
 
   if (cursor) {
-    const [cursorDate, cursorId] = cursor.split('|');
+    const { date: cursorDate, id: cursorId } = parseCompositeCursor(cursor);
     query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`;
     params.push(cursorDate, cursorDate, cursorId);
   }

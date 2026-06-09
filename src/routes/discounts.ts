@@ -2,6 +2,8 @@ import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { type Database, getDb } from '../db';
 import { type Discount as _Discount, validateDiscountFields } from '../lib/discounts';
+import { parseCompositeCursor } from '../lib/pagination';
+import { getStripe } from '../lib/stripe';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
   CreateDiscountBody,
@@ -58,7 +60,7 @@ async function syncDiscountToStripe(
     return { couponId: null, promotionCodeId: null };
   }
 
-  const stripe = new Stripe(stripeSecretKey);
+  const stripe = getStripe(stripeSecretKey);
 
   try {
     let couponId = discount.stripe_coupon_id;
@@ -162,7 +164,7 @@ app.openapi(listDiscounts, async (c) => {
   const params: unknown[] = [];
 
   if (cursor) {
-    const [cursorDate, cursorId] = cursor.split('|');
+    const { date: cursorDate, id: cursorId } = parseCompositeCursor(cursor);
     query += ` WHERE (created_at < ? OR (created_at = ? AND id < ?))`;
     params.push(cursorDate, cursorDate, cursorId);
   }

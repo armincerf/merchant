@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import Stripe from 'stripe';
 import { getDb } from '../db';
+import { getStripe } from '../lib/stripe';
 import { dispatchWebhooks } from '../lib/webhooks';
 import { ApiError, type HonoEnv } from '../types';
 import { handleUCPStripeWebhook } from './ucp';
@@ -32,7 +33,7 @@ webhooks.post('/stripe', async (c) => {
   }
 
   // Verify signature
-  const stripe = new Stripe(stripeConfig.secret_key);
+  const stripe = getStripe(stripeConfig.secret_key);
   let event: Stripe.Event;
 
   try {

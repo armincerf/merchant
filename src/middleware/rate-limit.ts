@@ -15,7 +15,7 @@ type WindowCounter = {
 };
 
 // In-memory store - resets when isolate recycles
-// Key format: `${identifier}:${windowStart}`
+// Key format: `${identifier}:${scope}:${windowStart}`
 const counters = new Map<string, WindowCounter>();
 
 // Cleanup old entries periodically
@@ -43,12 +43,13 @@ function getWindowStart(windowMs: number): number {
 
 function checkRateLimit(
   identifier: string,
+  scope: string,
   config: RateLimitConfig,
 ): { allowed: boolean; remaining: number; resetAt: number } {
   cleanup();
 
   const windowStart = getWindowStart(config.windowMs);
-  const key = `${identifier}:${windowStart}`;
+  const key = `${identifier}:${scope}:${windowStart}`;
 
   let counter = counters.get(key);
 
@@ -87,19 +88,14 @@ export function rateLimitMiddleware() {
       return next();
     }
 
-    // Determine role from API key prefix
-    let role: 'admin' | 'public' | undefined;
-    if (apiKey?.startsWith('sk_')) {
-      role = 'admin';
-    } else if (apiKey?.startsWith('pk_')) {
-      role = 'public';
-    }
-
-    // Get rate limit config for this request
-    const config = getLimitForRequest(path, role);
+    // Get rate limit config for this request.
+    // Role-based limits are NOT applied pre-authentication — using the key prefix
+    // (sk_/pk_) to infer a role would let callers claim a higher limit without
+    // ever being authenticated.
+    const { config, scope } = getLimitForRequest(path);
 
     // Check rate limit
-    const { allowed, remaining, resetAt } = checkRateLimit(identifier, config);
+    const { allowed, remaining, resetAt } = checkRateLimit(identifier, scope, config);
 
     // Add headers if configured
     if (rateLimits.includeHeaders) {
@@ -127,9 +123,9 @@ export function rateLimitMiddleware() {
  * Get current rate limit status for an identifier
  * Useful for debugging or admin endpoints
  */
-export function getRateLimitStatus(identifier: string, config: RateLimitConfig) {
+export function getRateLimitStatus(identifier: string, scope: string, config: RateLimitConfig) {
   const windowStart = getWindowStart(config.windowMs);
-  const key = `${identifier}:${windowStart}`;
+  const key = `${identifier}:${scope}:${windowStart}`;
   const counter = counters.get(key);
 
   return {
