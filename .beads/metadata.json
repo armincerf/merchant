@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "merchant",
+  "project_id": "cc7efd85-d9d3-4173-851d-51946b2069f7"
+}
