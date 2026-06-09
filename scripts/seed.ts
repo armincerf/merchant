@@ -173,7 +173,7 @@ async function seed() {
   const { items: allOrders } = await api('/v1/orders');
   console.log(`Products: ${allProducts.length}`);
   console.log(
-    `Variants: ${allProducts.reduce((sum: number, p: any) => sum + p.variants.length, 0)}`
+    `Variants: ${allProducts.reduce((sum: number, p: any) => sum + p.variants.length, 0)}`,
   );
   console.log(`Orders: ${allOrders.length}`);
 

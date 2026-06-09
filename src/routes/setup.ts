@@ -1,20 +1,23 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
-import { z } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { ApiError, now, type HonoEnv } from '../types';
-import { SetupStripeBody, OkResponse, ErrorResponse } from '../schemas';
+import { adminOnly, authMiddleware } from '../middleware/auth';
+import { ErrorResponse, OkResponse, SetupStripeBody } from '../schemas';
+import { ApiError, type HonoEnv, now } from '../types';
 
 const app = new OpenAPIHono<HonoEnv>();
 
-const InitKeysBody = z.object({
-  keys: z.array(z.object({
-    id: z.string().uuid(),
-    key_hash: z.string(),
-    key_prefix: z.string(),
-    role: z.enum(['public', 'admin']),
-  })),
-}).openapi('InitKeysBody');
+const InitKeysBody = z
+  .object({
+    keys: z.array(
+      z.object({
+        id: z.string().uuid(),
+        key_hash: z.string(),
+        key_prefix: z.string(),
+        role: z.enum(['public', 'admin']),
+      }),
+    ),
+  })
+  .openapi('InitKeysBody');
 
 const initKeys = createRoute({
   method: 'post',
@@ -27,7 +30,10 @@ const initKeys = createRoute({
   },
   responses: {
     200: { content: { 'application/json': { schema: OkResponse } }, description: 'Keys created' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Keys already exist' },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Keys already exist',
+    },
   },
 });
 
@@ -51,7 +57,7 @@ app.openapi(initKeys, async (c) => {
   for (const key of keys) {
     await db.run(
       `INSERT INTO api_keys (id, key_hash, key_prefix, role, created_at) VALUES (?, ?, ?, ?, ?)`,
-      [key.id, key.key_hash, key.key_prefix, key.role, now()]
+      [key.id, key.key_hash, key.key_prefix, key.role, now()],
     );
   }
 
@@ -70,8 +76,14 @@ const setupStripe = createRoute({
     body: { content: { 'application/json': { schema: SetupStripeBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: OkResponse } }, description: 'Stripe connected' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid Stripe key' },
+    200: {
+      content: { 'application/json': { schema: OkResponse } },
+      description: 'Stripe connected',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid Stripe key',
+    },
   },
 });
 
@@ -96,7 +108,7 @@ app.openapi(setupStripe, async (c) => {
   await db.run(
     `INSERT INTO config (key, value, updated_at) VALUES ('stripe', ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?`,
-    [configValue, now(), configValue, now()]
+    [configValue, now(), configValue, now()],
   );
 
   return c.json({ ok: true as const }, 200);

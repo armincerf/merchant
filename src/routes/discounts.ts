@@ -1,18 +1,18 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
 import Stripe from 'stripe';
-import { getDb, type Database } from '../db';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { ApiError, uuid, now, type HonoEnv } from '../types';
+import { type Database, getDb } from '../db';
+import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
-  IdParam,
-  PaginationQuery,
-  DiscountResponse,
-  DiscountListResponse,
   CreateDiscountBody,
-  UpdateDiscountBody,
+  DiscountListResponse,
+  DiscountResponse,
   ErrorResponse,
+  IdParam,
   OkResponse,
+  PaginationQuery,
+  UpdateDiscountBody,
 } from '../schemas';
+import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 type DiscountType = 'percentage' | 'fixed_amount';
 
@@ -37,7 +37,7 @@ export async function validateDiscount(
   db: Database,
   discount: Discount,
   subtotalCents: number,
-  customerEmail?: string
+  customerEmail?: string,
 ): Promise<void> {
   if (discount.status !== 'active') {
     throw ApiError.invalidRequest('Discount is not active');
@@ -53,7 +53,7 @@ export async function validateDiscount(
 
   if (discount.min_purchase_cents > 0 && subtotalCents < discount.min_purchase_cents) {
     throw ApiError.invalidRequest(
-      `Minimum purchase of $${(discount.min_purchase_cents / 100).toFixed(2)} required`
+      `Minimum purchase of $${(discount.min_purchase_cents / 100).toFixed(2)} required`,
     );
   }
 
@@ -64,7 +64,7 @@ export async function validateDiscount(
   if (customerEmail && discount.usage_limit_per_customer !== null) {
     const [usage] = await db.query<any>(
       `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
-      [discount.id, customerEmail.toLowerCase()]
+      [discount.id, customerEmail.toLowerCase()],
     );
     if (usage && usage.count >= discount.usage_limit_per_customer) {
       throw ApiError.invalidRequest('You have already used this discount');
@@ -101,7 +101,7 @@ async function syncDiscountToStripe(
     status?: string;
     stripe_coupon_id: string | null;
     stripe_promotion_code_id: string | null;
-  }
+  },
 ): Promise<{ couponId: string | null; promotionCodeId: string | null; syncError?: string }> {
   if (!stripeSecretKey) {
     return { couponId: null, promotionCodeId: null };
@@ -195,14 +195,17 @@ const listDiscounts = createRoute({
   middleware: [adminOnly] as const,
   request: { query: PaginationQuery },
   responses: {
-    200: { content: { 'application/json': { schema: DiscountListResponse } }, description: 'List of discounts' },
+    200: {
+      content: { 'application/json': { schema: DiscountListResponse } },
+      description: 'List of discounts',
+    },
   },
 });
 
 app.openapi(listDiscounts, async (c) => {
   const db = getDb(c.var.db);
   const { limit: limitStr, cursor } = c.req.valid('query');
-  const limit = Math.min(parseInt(limitStr || '100'), 250);
+  const limit = Math.min(parseInt(limitStr || '100', 10), 250);
 
   let query = `SELECT * FROM discounts`;
   const params: unknown[] = [];
@@ -238,7 +241,8 @@ app.openapi(listDiscounts, async (c) => {
   }));
 
   const lastDiscount = discounts.length > 0 ? discounts[discounts.length - 1] : null;
-  const nextCursor = hasMore && lastDiscount ? `${lastDiscount.created_at}|${lastDiscount.id}` : null;
+  const nextCursor =
+    hasMore && lastDiscount ? `${lastDiscount.created_at}|${lastDiscount.id}` : null;
 
   return c.json({ items, pagination: { has_more: hasMore, next_cursor: nextCursor } }, 200);
 });
@@ -252,8 +256,14 @@ const getDiscount = createRoute({
   middleware: [adminOnly] as const,
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: DiscountResponse } }, description: 'Discount details' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Discount not found' },
+    200: {
+      content: { 'application/json': { schema: DiscountResponse } },
+      description: 'Discount details',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Discount not found',
+    },
   },
 });
 
@@ -264,22 +274,25 @@ app.openapi(getDiscount, async (c) => {
   const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [id]);
   if (!discount) throw ApiError.notFound('Discount not found');
 
-  return c.json({
-    id: discount.id,
-    code: discount.code,
-    type: discount.type,
-    value: discount.value,
-    status: discount.status,
-    min_purchase_cents: discount.min_purchase_cents,
-    max_discount_cents: discount.max_discount_cents,
-    starts_at: discount.starts_at,
-    expires_at: discount.expires_at,
-    usage_limit: discount.usage_limit,
-    usage_limit_per_customer: discount.usage_limit_per_customer,
-    usage_count: discount.usage_count,
-    created_at: discount.created_at,
-    updated_at: discount.updated_at,
-  }, 200);
+  return c.json(
+    {
+      id: discount.id,
+      code: discount.code,
+      type: discount.type,
+      value: discount.value,
+      status: discount.status,
+      min_purchase_cents: discount.min_purchase_cents,
+      max_discount_cents: discount.max_discount_cents,
+      starts_at: discount.starts_at,
+      expires_at: discount.expires_at,
+      usage_limit: discount.usage_limit,
+      usage_limit_per_customer: discount.usage_limit_per_customer,
+      usage_count: discount.usage_count,
+      created_at: discount.created_at,
+      updated_at: discount.updated_at,
+    },
+    200,
+  );
 });
 
 const createDiscount = createRoute({
@@ -293,9 +306,18 @@ const createDiscount = createRoute({
     body: { content: { 'application/json': { schema: CreateDiscountBody } } },
   },
   responses: {
-    201: { content: { 'application/json': { schema: DiscountResponse } }, description: 'Created discount' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Discount code exists' },
+    201: {
+      content: { 'application/json': { schema: DiscountResponse } },
+      description: 'Created discount',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Discount code exists',
+    },
   },
 });
 
@@ -323,7 +345,9 @@ app.openapi(createDiscount, async (c) => {
   const normalizedCode = code ? code.toUpperCase().trim() : null;
 
   if (normalizedCode) {
-    const [existing] = await db.query<any>(`SELECT id FROM discounts WHERE code = ?`, [normalizedCode]);
+    const [existing] = await db.query<any>(`SELECT id FROM discounts WHERE code = ?`, [
+      normalizedCode,
+    ]);
     if (existing) throw ApiError.conflict(`Discount code ${normalizedCode} already exists`);
   }
 
@@ -371,27 +395,30 @@ app.openapi(createDiscount, async (c) => {
       stripePromotionCodeId,
       timestamp,
       timestamp,
-    ]
+    ],
   );
 
   const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [id]);
 
-  return c.json({
-    id: discount.id,
-    code: discount.code,
-    type: discount.type,
-    value: discount.value,
-    status: discount.status,
-    min_purchase_cents: discount.min_purchase_cents,
-    max_discount_cents: discount.max_discount_cents,
-    starts_at: discount.starts_at,
-    expires_at: discount.expires_at,
-    usage_limit: discount.usage_limit,
-    usage_limit_per_customer: discount.usage_limit_per_customer,
-    usage_count: discount.usage_count,
-    created_at: discount.created_at,
-    updated_at: discount.updated_at,
-  }, 201);
+  return c.json(
+    {
+      id: discount.id,
+      code: discount.code,
+      type: discount.type,
+      value: discount.value,
+      status: discount.status,
+      min_purchase_cents: discount.min_purchase_cents,
+      max_discount_cents: discount.max_discount_cents,
+      starts_at: discount.starts_at,
+      expires_at: discount.expires_at,
+      usage_limit: discount.usage_limit,
+      usage_limit_per_customer: discount.usage_limit_per_customer,
+      usage_count: discount.usage_count,
+      created_at: discount.created_at,
+      updated_at: discount.updated_at,
+    },
+    201,
+  );
 });
 
 const updateDiscount = createRoute({
@@ -406,10 +433,22 @@ const updateDiscount = createRoute({
     body: { content: { 'application/json': { schema: UpdateDiscountBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: DiscountResponse } }, description: 'Updated discount' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Discount not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Discount code exists' },
+    200: {
+      content: { 'application/json': { schema: DiscountResponse } },
+      description: 'Updated discount',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Discount not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Discount code exists',
+    },
   },
 });
 
@@ -446,7 +485,7 @@ app.openapi(updateDiscount, async (c) => {
     if (normalizedCode && normalizedCode !== existing.code) {
       const [duplicate] = await db.query<any>(
         `SELECT id FROM discounts WHERE code = ? AND id != ?`,
-        [normalizedCode, id]
+        [normalizedCode, id],
       );
       if (duplicate) throw ApiError.conflict(`Discount code ${normalizedCode} already exists`);
     }
@@ -497,7 +536,7 @@ app.openapi(updateDiscount, async (c) => {
 
   const stripeRelevantFields = ['code', 'value', 'max_discount_cents', 'expires_at', 'status'];
   const shouldSyncStripe = updates.some((update) =>
-    stripeRelevantFields.some((field) => update.includes(field))
+    stripeRelevantFields.some((field) => update.includes(field)),
   );
 
   if (shouldSyncStripe && stripeSecretKey) {
@@ -523,29 +562,32 @@ app.openapi(updateDiscount, async (c) => {
     ) {
       await db.run(
         `UPDATE discounts SET stripe_coupon_id = ?, stripe_promotion_code_id = ? WHERE id = ?`,
-        [stripeSync.couponId, stripeSync.promotionCodeId, discount.id]
+        [stripeSync.couponId, stripeSync.promotionCodeId, discount.id],
       );
       discount.stripe_coupon_id = stripeSync.couponId;
       discount.stripe_promotion_code_id = stripeSync.promotionCodeId;
     }
   }
 
-  return c.json({
-    id: discount.id,
-    code: discount.code,
-    type: discount.type,
-    value: discount.value,
-    status: discount.status,
-    min_purchase_cents: discount.min_purchase_cents,
-    max_discount_cents: discount.max_discount_cents,
-    starts_at: discount.starts_at,
-    expires_at: discount.expires_at,
-    usage_limit: discount.usage_limit,
-    usage_limit_per_customer: discount.usage_limit_per_customer,
-    usage_count: discount.usage_count,
-    created_at: discount.created_at,
-    updated_at: discount.updated_at,
-  }, 200);
+  return c.json(
+    {
+      id: discount.id,
+      code: discount.code,
+      type: discount.type,
+      value: discount.value,
+      status: discount.status,
+      min_purchase_cents: discount.min_purchase_cents,
+      max_discount_cents: discount.max_discount_cents,
+      starts_at: discount.starts_at,
+      expires_at: discount.expires_at,
+      usage_limit: discount.usage_limit,
+      usage_limit_per_customer: discount.usage_limit_per_customer,
+      usage_count: discount.usage_count,
+      created_at: discount.created_at,
+      updated_at: discount.updated_at,
+    },
+    200,
+  );
 });
 
 const deleteDiscount = createRoute({
@@ -557,8 +599,14 @@ const deleteDiscount = createRoute({
   middleware: [adminOnly] as const,
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: OkResponse } }, description: 'Discount deactivated' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Discount not found' },
+    200: {
+      content: { 'application/json': { schema: OkResponse } },
+      description: 'Discount deactivated',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Discount not found',
+    },
   },
 });
 
@@ -569,7 +617,10 @@ app.openapi(deleteDiscount, async (c) => {
   const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [id]);
   if (!discount) throw ApiError.notFound('Discount not found');
 
-  await db.run(`UPDATE discounts SET status = 'inactive', updated_at = ? WHERE id = ?`, [now(), id]);
+  await db.run(`UPDATE discounts SET status = 'inactive', updated_at = ? WHERE id = ?`, [
+    now(),
+    id,
+  ]);
 
   return c.json({ ok: true as const }, 200);
 });

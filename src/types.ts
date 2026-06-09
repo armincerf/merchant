@@ -41,7 +41,7 @@ export class ApiError extends Error {
     public code: string,
     public statusCode: number,
     message: string,
-    public details?: Record<string, unknown>
+    public details?: Record<string, unknown>,
   ) {
     super(message);
   }

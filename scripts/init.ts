@@ -19,11 +19,11 @@ function generateApiKey(prefix: 'pk' | 'sk'): string {
 
 async function init() {
   const isRemote = process.argv.includes('--remote');
-  const baseUrl = isRemote 
+  const baseUrl = isRemote
     ? process.env.MERCHANT_URL || 'https://merchant.your-domain.workers.dev'
     : 'http://localhost:8787';
   const envLabel = isRemote ? 'PRODUCTION' : 'LOCAL';
-  
+
   console.log(`🚀 Initializing merchant (${envLabel})...\n`);
 
   if (isRemote && !process.env.MERCHANT_URL) {
@@ -39,7 +39,7 @@ async function init() {
   const adminId = crypto.randomUUID();
 
   console.log('🔑 Creating API keys via /v1/setup/init...');
-  
+
   const response = await fetch(`${baseUrl}/v1/setup/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -47,7 +47,7 @@ async function init() {
       keys: [
         { id: publicId, key_hash: publicHash, key_prefix: 'pk_', role: 'public' },
         { id: adminId, key_hash: adminHash, key_prefix: 'sk_', role: 'admin' },
-      ]
+      ],
     }),
   });
 
@@ -61,7 +61,7 @@ async function init() {
   console.log('\n🔑 API Keys (save these, shown only once):\n');
   console.log(`   Public:  ${publicKey}`);
   console.log(`   Admin:   ${adminKey}`);
-  console.log('\n' + '─'.repeat(50));
+  console.log(`\n${'─'.repeat(50)}`);
   console.log('\n📝 Next steps:\n');
   console.log('   1. Start the API:');
   console.log('      npm run dev\n');
@@ -70,7 +70,7 @@ async function init() {
   console.log(`        -H "Authorization: Bearer ${adminKey}" \\`);
   console.log(`        -H "Content-Type: application/json" \\`);
   console.log(
-    `        -d '{"stripe_secret_key":"sk_test_...","stripe_webhook_secret":"whsec_..."}'\n`
+    `        -d '{"stripe_secret_key":"sk_test_...","stripe_webhook_secret":"whsec_..."}'\n`,
   );
   console.log('   3. Seed demo data:');
   console.log(`      npx tsx scripts/seed.ts ${baseUrl} ${adminKey}\n`);

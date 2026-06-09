@@ -1,22 +1,22 @@
+import { swaggerUI } from '@hono/swagger-ui';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { cors } from 'hono/cors';
-import { swaggerUI } from '@hono/swagger-ui';
-import { setup } from './routes/setup';
+import { MerchantDO } from './do';
+import { rateLimitMiddleware } from './middleware/rate-limit';
+import { analytics } from './routes/analytics';
 import { catalog } from './routes/catalog';
-import { inventory } from './routes/inventory';
 import { checkout } from './routes/checkout';
-import { orders } from './routes/orders';
 import { customers } from './routes/customers';
+import { discounts } from './routes/discounts';
+import { images } from './routes/images';
+import { inventory } from './routes/inventory';
+import { oauth } from './routes/oauth';
+import { orders } from './routes/orders';
+import { setup } from './routes/setup';
+import { ucp } from './routes/ucp';
 import { webhooks } from './routes/webhooks';
 import { webhooksRoutes } from './routes/webhooks-outbound';
-import { images } from './routes/images';
-import { discounts } from './routes/discounts';
-import { oauth } from './routes/oauth';
-import { ucp } from './routes/ucp';
-import { analytics } from './routes/analytics';
-import { rateLimitMiddleware } from './middleware/rate-limit';
-import { ApiError, type Env, type DOStub } from './types';
-import { MerchantDO } from './do';
+import { ApiError, type DOStub, type Env } from './types';
 
 export { MerchantDO };
 
@@ -49,7 +49,7 @@ app.onError((err, c) => {
           ...(err.details && { details: err.details }),
         },
       },
-      err.statusCode as any
+      err.statusCode as any,
     );
   }
 
@@ -97,7 +97,9 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const id = env.MERCHANT.idFromName('default');
     const stub = env.MERCHANT.get(id);
-    const cleaned = await (stub as unknown as { cleanupExpiredCarts: () => Promise<number> }).cleanupExpiredCarts();
+    const cleaned = await (
+      stub as unknown as { cleanupExpiredCarts: () => Promise<number> }
+    ).cleanupExpiredCarts();
     console.log(`Cron: cleaned ${cleaned} expired carts`);
   },
 };

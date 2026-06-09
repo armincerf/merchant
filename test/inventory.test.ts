@@ -6,9 +6,8 @@
  * inventory_logs are created on adjust.
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
-import { SELF } from 'cloudflare:test';
-import { seedStore, authedFetch, anonFetch, jsonBody, type SeedResult } from './helpers';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { anonFetch, authedFetch, jsonBody, type SeedResult, seedStore } from './helpers';
 
 let seed: SeedResult;
 

@@ -1,63 +1,69 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
-import { z } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
-import { ApiError, now, type HonoEnv } from '../types';
-import { authMiddleware, adminOnly } from '../middleware/auth';
+import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
-  IdParam,
-  CustomerResponse,
-  CustomerWithAddresses,
+  AddressIdParam,
+  AddressResponse,
+  CreateAddressBody,
   CustomerListResponse,
   CustomerQuery,
-  UpdateCustomerBody,
-  CreateAddressBody,
-  AddressResponse,
-  AddressIdParam,
-  OrderListResponse,
-  PaginationQuery,
-  ErrorResponse,
+  CustomerResponse,
+  CustomerWithAddresses,
   DeletedResponse,
+  ErrorResponse,
+  IdParam,
+  PaginationQuery,
+  UpdateCustomerBody,
 } from '../schemas';
+import { ApiError, type HonoEnv, now } from '../types';
 
 const CustomerOrdersQuery = PaginationQuery;
 
-const CustomerOrderResponse = z.object({
-  id: z.string().uuid(),
-  number: z.string(),
-  status: z.string(),
-  shipping: z.object({
-    name: z.string().nullable(),
-    phone: z.string().nullable(),
-    address: z.any().nullable(),
-  }),
-  amounts: z.object({
-    subtotal_cents: z.number().int(),
-    tax_cents: z.number().int(),
-    shipping_cents: z.number().int(),
-    total_cents: z.number().int(),
-    currency: z.string(),
-  }),
-  items: z.array(z.object({
-    sku: z.string(),
-    title: z.string(),
-    qty: z.number().int(),
-    unit_price_cents: z.number().int(),
-  })),
-  tracking: z.object({
+const CustomerOrderResponse = z
+  .object({
+    id: z.string().uuid(),
     number: z.string(),
-    url: z.string().nullable(),
-    shipped_at: z.string().nullable(),
-  }).nullable(),
-  created_at: z.string().datetime(),
-}).openapi('CustomerOrder');
+    status: z.string(),
+    shipping: z.object({
+      name: z.string().nullable(),
+      phone: z.string().nullable(),
+      address: z.any().nullable(),
+    }),
+    amounts: z.object({
+      subtotal_cents: z.number().int(),
+      tax_cents: z.number().int(),
+      shipping_cents: z.number().int(),
+      total_cents: z.number().int(),
+      currency: z.string(),
+    }),
+    items: z.array(
+      z.object({
+        sku: z.string(),
+        title: z.string(),
+        qty: z.number().int(),
+        unit_price_cents: z.number().int(),
+      }),
+    ),
+    tracking: z
+      .object({
+        number: z.string(),
+        url: z.string().nullable(),
+        shipped_at: z.string().nullable(),
+      })
+      .nullable(),
+    created_at: z.string().datetime(),
+  })
+  .openapi('CustomerOrder');
 
-const CustomerOrdersResponse = z.object({
-  items: z.array(CustomerOrderResponse),
-  pagination: z.object({
-    has_more: z.boolean(),
-    next_cursor: z.string().nullable(),
-  }),
-}).openapi('CustomerOrdersList');
+const CustomerOrdersResponse = z
+  .object({
+    items: z.array(CustomerOrderResponse),
+    pagination: z.object({
+      has_more: z.boolean(),
+      next_cursor: z.string().nullable(),
+    }),
+  })
+  .openapi('CustomerOrdersList');
 
 const app = new OpenAPIHono<HonoEnv>();
 
@@ -73,14 +79,17 @@ const listCustomers = createRoute({
   middleware: [adminOnly] as const,
   request: { query: CustomerQuery },
   responses: {
-    200: { content: { 'application/json': { schema: CustomerListResponse } }, description: 'List of customers' },
+    200: {
+      content: { 'application/json': { schema: CustomerListResponse } },
+      description: 'List of customers',
+    },
   },
 });
 
 app.openapi(listCustomers, async (c) => {
   const db = getDb(c.var.db);
   const { limit: limitStr, cursor, search } = c.req.valid('query');
-  const limit = Math.min(parseInt(limitStr || '50'), 100);
+  const limit = Math.min(parseInt(limitStr || '50', 10), 100);
 
   let query = `SELECT * FROM customers WHERE 1=1`;
   const params: any[] = [];
@@ -105,13 +114,16 @@ app.openapi(listCustomers, async (c) => {
 
   const lastItem = items.length > 0 ? items[items.length - 1] : null;
 
-  return c.json({
-    items: items.map(formatCustomer),
-    pagination: {
-      has_more: hasMore,
-      next_cursor: hasMore && lastItem ? `${lastItem.created_at}|${lastItem.id}` : null,
+  return c.json(
+    {
+      items: items.map(formatCustomer),
+      pagination: {
+        has_more: hasMore,
+        next_cursor: hasMore && lastItem ? `${lastItem.created_at}|${lastItem.id}` : null,
+      },
     },
-  }, 200);
+    200,
+  );
 });
 
 const getCustomer = createRoute({
@@ -124,8 +136,14 @@ const getCustomer = createRoute({
   middleware: [adminOnly] as const,
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: CustomerWithAddresses } }, description: 'Customer details' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Customer not found' },
+    200: {
+      content: { 'application/json': { schema: CustomerWithAddresses } },
+      description: 'Customer details',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Customer not found',
+    },
   },
 });
 
@@ -138,13 +156,16 @@ app.openapi(getCustomer, async (c) => {
 
   const addresses = await db.query<any>(
     `SELECT * FROM customer_addresses WHERE customer_id = ? ORDER BY is_default DESC, created_at DESC`,
-    [id]
+    [id],
   );
 
-  return c.json({
-    ...formatCustomer(customer),
-    addresses: addresses.map(formatAddress),
-  }, 200);
+  return c.json(
+    {
+      ...formatCustomer(customer),
+      addresses: addresses.map(formatAddress),
+    },
+    200,
+  );
 });
 
 const getCustomerOrders = createRoute({
@@ -159,8 +180,14 @@ const getCustomerOrders = createRoute({
     query: CustomerOrdersQuery,
   },
   responses: {
-    200: { content: { 'application/json': { schema: CustomerOrdersResponse } }, description: 'Customer orders' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Customer not found' },
+    200: {
+      content: { 'application/json': { schema: CustomerOrdersResponse } },
+      description: 'Customer orders',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Customer not found',
+    },
   },
 });
 
@@ -168,7 +195,7 @@ app.openapi(getCustomerOrders, async (c) => {
   const db = getDb(c.var.db);
   const { id } = c.req.valid('param');
   const { limit: limitStr, cursor } = c.req.valid('query');
-  const limit = Math.min(parseInt(limitStr || '20'), 100);
+  const limit = Math.min(parseInt(limitStr || '20', 10), 100);
 
   const [customer] = await db.query<any>(`SELECT id FROM customers WHERE id = ?`, [id]);
   if (!customer) throw ApiError.notFound('Customer');
@@ -196,7 +223,7 @@ app.openapi(getCustomerOrders, async (c) => {
     const placeholders = orderIds.map(() => '?').join(',');
     const allItems = await db.query<any>(
       `SELECT * FROM order_items WHERE order_id IN (${placeholders})`,
-      orderIds
+      orderIds,
     );
 
     for (const item of allItems) {
@@ -214,13 +241,16 @@ app.openapi(getCustomerOrders, async (c) => {
 
   const lastItem = items.length > 0 ? items[items.length - 1] : null;
 
-  return c.json({
-    items: ordersWithItems.map(formatOrder),
-    pagination: {
-      has_more: hasMore,
-      next_cursor: hasMore && lastItem ? `${lastItem.created_at}|${lastItem.id}` : null,
+  return c.json(
+    {
+      items: ordersWithItems.map(formatOrder),
+      pagination: {
+        has_more: hasMore,
+        next_cursor: hasMore && lastItem ? `${lastItem.created_at}|${lastItem.id}` : null,
+      },
     },
-  }, 200);
+    200,
+  );
 });
 
 const updateCustomer = createRoute({
@@ -235,8 +265,14 @@ const updateCustomer = createRoute({
     body: { content: { 'application/json': { schema: UpdateCustomerBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: CustomerResponse } }, description: 'Updated customer' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Customer not found' },
+    200: {
+      content: { 'application/json': { schema: CustomerResponse } },
+      description: 'Updated customer',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Customer not found',
+    },
   },
 });
 
@@ -295,9 +331,18 @@ const createAddress = createRoute({
     body: { content: { 'application/json': { schema: CreateAddressBody } } },
   },
   responses: {
-    201: { content: { 'application/json': { schema: AddressResponse } }, description: 'Created address' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Customer not found' },
+    201: {
+      content: { 'application/json': { schema: AddressResponse } },
+      description: 'Created address',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Customer not found',
+    },
   },
 });
 
@@ -317,7 +362,7 @@ app.openapi(createAddress, async (c) => {
 
   const [addressCount] = await db.query<any>(
     `SELECT COUNT(*) as count FROM customer_addresses WHERE customer_id = ?`,
-    [id]
+    [id],
   );
   const isDefault = body.is_default || addressCount.count === 0 ? 1 : 0;
 
@@ -338,10 +383,12 @@ app.openapi(createAddress, async (c) => {
       body.postal_code,
       body.country || 'US',
       body.phone || null,
-    ]
+    ],
   );
 
-  const [address] = await db.query<any>(`SELECT * FROM customer_addresses WHERE id = ?`, [addressId]);
+  const [address] = await db.query<any>(`SELECT * FROM customer_addresses WHERE id = ?`, [
+    addressId,
+  ]);
 
   return c.json(formatAddress(address), 201);
 });
@@ -355,8 +402,14 @@ const deleteAddress = createRoute({
   middleware: [adminOnly] as const,
   request: { params: AddressIdParam },
   responses: {
-    200: { content: { 'application/json': { schema: DeletedResponse } }, description: 'Address deleted' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Customer or address not found' },
+    200: {
+      content: { 'application/json': { schema: DeletedResponse } },
+      description: 'Address deleted',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Customer or address not found',
+    },
   },
 });
 
@@ -369,7 +422,7 @@ app.openapi(deleteAddress, async (c) => {
 
   const [address] = await db.query<any>(
     `SELECT * FROM customer_addresses WHERE id = ? AND customer_id = ?`,
-    [addressId, id]
+    [addressId, id],
   );
   if (!address) throw ApiError.notFound('Address');
 
@@ -379,7 +432,7 @@ app.openapi(deleteAddress, async (c) => {
     await db.run(
       `UPDATE customer_addresses SET is_default = 1 
        WHERE customer_id = ? AND id = (SELECT id FROM customer_addresses WHERE customer_id = ? LIMIT 1)`,
-      [id, id]
+      [id, id],
     );
   }
 

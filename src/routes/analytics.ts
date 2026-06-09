@@ -1,40 +1,41 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
-import { z } from '@hono/zod-openapi';
-import { getDb, type Database } from '../db';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { uuid, now, type HonoEnv } from '../types';
-import { ErrorResponse } from '../schemas';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { type Database, getDb } from '../db';
 import { isBot } from '../lib/bot-detect';
+import { adminOnly, authMiddleware } from '../middleware/auth';
+import { ErrorResponse } from '../schemas';
+import { type HonoEnv, now, uuid } from '../types';
 
 // ============================================================
 // SCHEMAS
 // ============================================================
 
-const EventType = z.enum([
-  'page_view',
-  'product_view',
-  'add_to_cart',
-  'checkout_started',
-  'order_completed',
-]).openapi({ example: 'page_view' });
+const EventType = z
+  .enum(['page_view', 'product_view', 'add_to_cart', 'checkout_started', 'order_completed'])
+  .openapi({ example: 'page_view' });
 
-const EventData = z.object({
-  product_id: z.string().optional(),
-  product_name: z.string().optional(),
-  variant_id: z.string().optional(),
-  price_cents: z.number().int().optional(),
-  quantity: z.number().int().optional(),
-  order_id: z.string().optional(),
-  order_total_cents: z.number().int().optional(),
-}).passthrough().optional().openapi({ example: { product_id: '550e8400-e29b-41d4-a716-446655440000' } });
+const EventData = z
+  .object({
+    product_id: z.string().optional(),
+    product_name: z.string().optional(),
+    variant_id: z.string().optional(),
+    price_cents: z.number().int().optional(),
+    quantity: z.number().int().optional(),
+    order_id: z.string().optional(),
+    order_total_cents: z.number().int().optional(),
+  })
+  .passthrough()
+  .optional()
+  .openapi({ example: { product_id: '550e8400-e29b-41d4-a716-446655440000' } });
 
-const TrackEventBody = z.object({
-  event_type: EventType,
-  session_id: z.string().min(1).openapi({ example: 'sess_abc123' }),
-  page_path: z.string().min(1).openapi({ example: '/products/organic-eggs' }),
-  referrer: z.string().optional().openapi({ example: 'https://google.com' }),
-  event_data: EventData,
-}).openapi('TrackEvent');
+const TrackEventBody = z
+  .object({
+    event_type: EventType,
+    session_id: z.string().min(1).openapi({ example: 'sess_abc123' }),
+    page_path: z.string().min(1).openapi({ example: '/products/organic-eggs' }),
+    referrer: z.string().optional().openapi({ example: 'https://google.com' }),
+    event_data: EventData,
+  })
+  .openapi('TrackEvent');
 
 // ============================================================
 // HELPERS
@@ -55,7 +56,9 @@ function parseDeviceType(userAgent: string | undefined | null): 'mobile' | 'tabl
   }
 
   // Check mobile
-  if (/mobile|iphone|ipod|android.*mobile|windows phone|blackberry|opera mini|opera mobi/i.test(ua)) {
+  if (
+    /mobile|iphone|ipod|android.*mobile|windows phone|blackberry|opera mini|opera mobi/i.test(ua)
+  ) {
     return 'mobile';
   }
 
@@ -76,7 +79,8 @@ const trackEvent = createRoute({
   path: '/events',
   tags: ['Analytics'],
   summary: 'Track an analytics event',
-  description: 'Record a page view, product view, cart action, or order event. Bot requests are silently dropped. Returns 204 on success.',
+  description:
+    'Record a page view, product view, cart action, or order event. Bot requests are silently dropped. Returns 204 on success.',
   security: [{ bearerAuth: [] }],
   request: {
     body: { content: { 'application/json': { schema: TrackEventBody } } },
@@ -103,20 +107,19 @@ app.openapi(trackEvent, async (c) => {
   const deviceType = parseDeviceType(userAgent);
 
   // Upsert session: create if not exists, update last_seen_at and page_count
-  const [existingSession] = await db.query<any>(
-    `SELECT id FROM analytics_sessions WHERE id = ?`,
-    [session_id]
-  );
+  const [existingSession] = await db.query<any>(`SELECT id FROM analytics_sessions WHERE id = ?`, [
+    session_id,
+  ]);
 
   if (existingSession) {
     await db.run(
       `UPDATE analytics_sessions SET last_seen_at = ?, page_count = page_count + 1 WHERE id = ?`,
-      [timestamp, session_id]
+      [timestamp, session_id],
     );
   } else {
     await db.run(
       `INSERT INTO analytics_sessions (id, first_seen_at, last_seen_at, page_count, ip_country, device_type) VALUES (?, ?, ?, 1, ?, ?)`,
-      [session_id, timestamp, timestamp, ipCountry, deviceType]
+      [session_id, timestamp, timestamp, ipCountry, deviceType],
     );
   }
 
@@ -133,7 +136,7 @@ app.openapi(trackEvent, async (c) => {
       userAgent || null,
       ipCountry,
       timestamp,
-    ]
+    ],
   );
 
   return c.body(null, 204);
@@ -144,10 +147,13 @@ app.openapi(trackEvent, async (c) => {
 // ============================================================
 
 const PeriodQuery = z.object({
-  period: z.enum(['7d', '30d', '90d']).default('30d').openapi({
-    param: { name: 'period', in: 'query' },
-    example: '30d',
-  }),
+  period: z
+    .enum(['7d', '30d', '90d'])
+    .default('30d')
+    .openapi({
+      param: { name: 'period', in: 'query' },
+      example: '30d',
+    }),
 });
 
 const TopProduct = z.object({
@@ -189,18 +195,20 @@ const PeriodMetrics = z.object({
   revenue_cents: z.number().int(),
 });
 
-const SummaryResponse = z.object({
-  visitors: z.number().int(),
-  page_views: z.number().int(),
-  orders: z.number().int(),
-  revenue_cents: z.number().int(),
-  top_products: z.array(TopProduct),
-  top_pages: z.array(TopPage),
-  top_referrers: z.array(TopReferrer),
-  daily_stats: z.array(DailyStat),
-  prior_period: PeriodMetrics,
-  device_breakdown: DeviceBreakdown,
-}).openapi('AnalyticsSummary');
+const SummaryResponse = z
+  .object({
+    visitors: z.number().int(),
+    page_views: z.number().int(),
+    orders: z.number().int(),
+    revenue_cents: z.number().int(),
+    top_products: z.array(TopProduct),
+    top_pages: z.array(TopPage),
+    top_referrers: z.array(TopReferrer),
+    daily_stats: z.array(DailyStat),
+    prior_period: PeriodMetrics,
+    device_breakdown: DeviceBreakdown,
+  })
+  .openapi('AnalyticsSummary');
 
 // ============================================================
 // SUMMARY HELPERS
@@ -208,9 +216,12 @@ const SummaryResponse = z.object({
 
 function periodToDays(period: '7d' | '30d' | '90d'): number {
   switch (period) {
-    case '7d': return 7;
-    case '30d': return 30;
-    case '90d': return 90;
+    case '7d':
+      return 7;
+    case '30d':
+      return 30;
+    case '90d':
+      return 90;
   }
 }
 
@@ -279,14 +290,18 @@ const getSummary = createRoute({
   path: '/summary',
   tags: ['Analytics'],
   summary: 'Get analytics summary',
-  description: 'Returns aggregated analytics metrics for the specified period. Admin access required.',
+  description:
+    'Returns aggregated analytics metrics for the specified period. Admin access required.',
   security: [{ bearerAuth: [] }],
   middleware: [adminOnly] as const,
   request: {
     query: PeriodQuery,
   },
   responses: {
-    200: { content: { 'application/json': { schema: SummaryResponse } }, description: 'Analytics summary' },
+    200: {
+      content: { 'application/json': { schema: SummaryResponse } },
+      description: 'Analytics summary',
+    },
     403: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Forbidden' },
   },
 });
@@ -387,13 +402,25 @@ app.openapi(getSummary, async (c) => {
 
   // Fill in missing days with zeroed metrics
   const dailyMap = new Map(dailyStats.map((d) => [d.date, d]));
-  const filledDaily: Array<{ date: string; visitors: number; page_views: number; orders: number; revenue_cents: number }> = [];
+  const filledDaily: Array<{
+    date: string;
+    visitors: number;
+    page_views: number;
+    orders: number;
+    revenue_cents: number;
+  }> = [];
   const cursor = new Date(current.start);
   const endDate = new Date(current.end);
   while (cursor < endDate) {
     const dateStr = cursor.toISOString().slice(0, 10);
     filledDaily.push(
-      dailyMap.get(dateStr) ?? { date: dateStr, visitors: 0, page_views: 0, orders: 0, revenue_cents: 0 },
+      dailyMap.get(dateStr) ?? {
+        date: dateStr,
+        visitors: 0,
+        page_views: 0,
+        orders: 0,
+        revenue_cents: 0,
+      },
     );
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
@@ -409,46 +436,60 @@ app.openapi(getSummary, async (c) => {
 
   const deviceBreakdown = { desktop: 0, mobile: 0, tablet: 0 };
   for (const row of deviceRows) {
-    if (row.device_type === 'desktop' || row.device_type === 'mobile' || row.device_type === 'tablet') {
+    if (
+      row.device_type === 'desktop' ||
+      row.device_type === 'mobile' ||
+      row.device_type === 'tablet'
+    ) {
       deviceBreakdown[row.device_type] = row.count;
     }
   }
 
-  return c.json({
-    ...currentMetrics,
-    top_products: topProducts.map((p) => ({
-      product_id: p.product_id,
-      product_name: p.product_name,
-      views: p.views,
-      add_to_carts: p.add_to_carts,
-      purchases: p.purchases,
-    })),
-    top_pages: topPages.map((p) => ({
-      page_path: p.page_path,
-      views: p.views,
-    })),
-    top_referrers: topReferrers,
-    daily_stats: filledDaily,
-    prior_period: priorMetrics,
-    device_breakdown: deviceBreakdown,
-  }, 200);
+  return c.json(
+    {
+      ...currentMetrics,
+      top_products: topProducts.map((p) => ({
+        product_id: p.product_id,
+        product_name: p.product_name,
+        views: p.views,
+        add_to_carts: p.add_to_carts,
+        purchases: p.purchases,
+      })),
+      top_pages: topPages.map((p) => ({
+        page_path: p.page_path,
+        views: p.views,
+      })),
+      top_referrers: topReferrers,
+      daily_stats: filledDaily,
+      prior_period: priorMetrics,
+      device_breakdown: deviceBreakdown,
+    },
+    200,
+  );
 });
 
 // ============================================================
 // FUNNEL SCHEMAS
 // ============================================================
 
-const FunnelStep = z.object({
-  name: z.string().openapi({ example: 'Page View' }),
-  event_type: z.string().openapi({ example: 'page_view' }),
-  unique_sessions: z.number().int().openapi({ example: 1000 }),
-  drop_off_pct: z.number().openapi({ example: 0, description: 'Percentage decrease from previous step. First step = 0.' }),
-}).openapi('FunnelStep');
+const FunnelStep = z
+  .object({
+    name: z.string().openapi({ example: 'Page View' }),
+    event_type: z.string().openapi({ example: 'page_view' }),
+    unique_sessions: z.number().int().openapi({ example: 1000 }),
+    drop_off_pct: z.number().openapi({
+      example: 0,
+      description: 'Percentage decrease from previous step. First step = 0.',
+    }),
+  })
+  .openapi('FunnelStep');
 
-const FunnelResponse = z.object({
-  period: z.enum(['7d', '30d', '90d']).openapi({ example: '30d' }),
-  steps: z.array(FunnelStep),
-}).openapi('ConversionFunnel');
+const FunnelResponse = z
+  .object({
+    period: z.enum(['7d', '30d', '90d']).openapi({ example: '30d' }),
+    steps: z.array(FunnelStep),
+  })
+  .openapi('ConversionFunnel');
 
 // ============================================================
 // FUNNEL ROUTE
@@ -467,14 +508,18 @@ const getFunnel = createRoute({
   path: '/funnel',
   tags: ['Analytics'],
   summary: 'Get conversion funnel',
-  description: 'Returns conversion funnel data showing drop-off between each step. Admin access required.',
+  description:
+    'Returns conversion funnel data showing drop-off between each step. Admin access required.',
   security: [{ bearerAuth: [] }],
   middleware: [adminOnly] as const,
   request: {
     query: PeriodQuery,
   },
   responses: {
-    200: { content: { 'application/json': { schema: FunnelResponse } }, description: 'Conversion funnel data' },
+    200: {
+      content: { 'application/json': { schema: FunnelResponse } },
+      description: 'Conversion funnel data',
+    },
     403: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Forbidden' },
   },
 });
@@ -489,7 +534,12 @@ app.openapi(getFunnel, async (c) => {
   // previous steps. We build up a running intersection of session sets.
   let previousSessions: Set<string> | null = null;
 
-  const steps: Array<{ name: string; event_type: string; unique_sessions: number; drop_off_pct: number }> = [];
+  const steps: Array<{
+    name: string;
+    event_type: string;
+    unique_sessions: number;
+    drop_off_pct: number;
+  }> = [];
 
   for (const step of FUNNEL_STEPS) {
     // Get distinct sessions for this event type in the period

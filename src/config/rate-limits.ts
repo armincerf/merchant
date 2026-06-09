@@ -78,6 +78,3 @@ export function getLimitForRequest(path: string, role?: 'admin' | 'public'): Rat
   // Fall back to default
   return rateLimits.default;
 }
-
-
-

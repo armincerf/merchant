@@ -1,22 +1,21 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
-import { z } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { ApiError, uuid, now, type HonoEnv } from '../types';
+import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
+  CreateProductBody,
+  CreateVariantBody,
+  DeletedResponse,
+  ErrorResponse,
   IdParam,
-  ProductResponse,
   ProductImageResponse,
   ProductListResponse,
-  CreateProductBody,
-  UpdateProductBody,
   ProductQuery,
-  VariantResponse,
-  CreateVariantBody,
+  ProductResponse,
+  UpdateProductBody,
   UpdateVariantBody,
-  ErrorResponse,
-  DeletedResponse,
+  VariantResponse,
 } from '../schemas';
+import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 function slugify(text: string): string {
   return text
@@ -28,8 +27,14 @@ function slugify(text: string): string {
 }
 
 const VariantIdParam = z.object({
-  id: z.string().uuid().openapi({ param: { name: 'id', in: 'path' } }),
-  variantId: z.string().uuid().openapi({ param: { name: 'variantId', in: 'path' } }),
+  id: z
+    .string()
+    .uuid()
+    .openapi({ param: { name: 'id', in: 'path' } }),
+  variantId: z
+    .string()
+    .uuid()
+    .openapi({ param: { name: 'variantId', in: 'path' } }),
 });
 
 const app = new OpenAPIHono<HonoEnv>();
@@ -44,14 +49,17 @@ const listProducts = createRoute({
   security: [{ bearerAuth: [] }],
   request: { query: ProductQuery },
   responses: {
-    200: { content: { 'application/json': { schema: ProductListResponse } }, description: 'List of products' },
+    200: {
+      content: { 'application/json': { schema: ProductListResponse } },
+      description: 'List of products',
+    },
   },
 });
 
 app.openapi(listProducts, async (c) => {
   const db = getDb(c.var.db);
   const { limit: limitStr, cursor, status } = c.req.valid('query');
-  const limit = Math.min(parseInt(limitStr || '20'), 100);
+  const limit = Math.min(parseInt(limitStr || '20', 10), 100);
 
   let query = `SELECT * FROM products`;
   const params: unknown[] = [];
@@ -85,7 +93,7 @@ app.openapi(listProducts, async (c) => {
     const placeholders = productIds.map(() => '?').join(',');
     const allVariants = await db.query<any>(
       `SELECT * FROM variants WHERE product_id IN (${placeholders}) ORDER BY created_at ASC`,
-      productIds
+      productIds,
     );
 
     for (const v of allVariants) {
@@ -97,7 +105,7 @@ app.openapi(listProducts, async (c) => {
 
     const allImages = await db.query<any>(
       `SELECT * FROM product_images WHERE product_id IN (${placeholders}) ORDER BY position ASC`,
-      productIds
+      productIds,
     );
 
     for (const img of allImages) {
@@ -143,7 +151,10 @@ const getProduct = createRoute({
   security: [{ bearerAuth: [] }],
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: ProductResponse } }, description: 'Product details' },
+    200: {
+      content: { 'application/json': { schema: ProductResponse } },
+      description: 'Product details',
+    },
     404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not found' },
   },
 });
@@ -157,35 +168,38 @@ app.openapi(getProduct, async (c) => {
 
   const variants = await db.query<any>(
     `SELECT * FROM variants WHERE product_id = ? ORDER BY created_at ASC`,
-    [id]
+    [id],
   );
 
   const images = await db.query<any>(
     `SELECT * FROM product_images WHERE product_id = ? ORDER BY position ASC`,
-    [id]
+    [id],
   );
 
-  return c.json({
-    id: product.id,
-    title: product.title,
-    slug: product.slug || slugify(product.title),
-    description: product.description,
-    image_url: product.image_url || null,
-    status: product.status,
-    images: images.map((img) => ({
-      id: img.id,
-      image_url: img.image_url,
-      position: img.position,
-    })),
-    created_at: product.created_at,
-    variants: variants.map((v) => ({
-      id: v.id,
-      sku: v.sku,
-      title: v.title,
-      price_cents: v.price_cents,
-      image_url: v.image_url,
-    })),
-  }, 200);
+  return c.json(
+    {
+      id: product.id,
+      title: product.title,
+      slug: product.slug || slugify(product.title),
+      description: product.description,
+      image_url: product.image_url || null,
+      status: product.status,
+      images: images.map((img) => ({
+        id: img.id,
+        image_url: img.image_url,
+        position: img.position,
+      })),
+      created_at: product.created_at,
+      variants: variants.map((v) => ({
+        id: v.id,
+        sku: v.sku,
+        title: v.title,
+        price_cents: v.price_cents,
+        image_url: v.image_url,
+      })),
+    },
+    200,
+  );
 });
 
 const createProduct = createRoute({
@@ -197,8 +211,14 @@ const createProduct = createRoute({
   middleware: [adminOnly] as const,
   request: { body: { content: { 'application/json': { schema: CreateProductBody } } } },
   responses: {
-    201: { content: { 'application/json': { schema: ProductResponse } }, description: 'Product created' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
+    201: {
+      content: { 'application/json': { schema: ProductResponse } },
+      description: 'Product created',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
   },
 });
 
@@ -219,12 +239,22 @@ app.openapi(createProduct, async (c) => {
 
   await db.run(
     `INSERT INTO products (id, title, slug, description, image_url, status, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?)`,
-    [id, title, slug, description || null, image_url || null, timestamp]
+    [id, title, slug, description || null, image_url || null, timestamp],
   );
 
   return c.json(
-    { id, title, slug, description: description || null, image_url: image_url || null, status: 'active' as const, images: [], created_at: timestamp, variants: [] },
-    201
+    {
+      id,
+      title,
+      slug,
+      description: description || null,
+      image_url: image_url || null,
+      status: 'active' as const,
+      images: [],
+      created_at: timestamp,
+      variants: [],
+    },
+    201,
   );
 });
 
@@ -240,7 +270,10 @@ const updateProduct = createRoute({
     body: { content: { 'application/json': { schema: UpdateProductBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: ProductResponse } }, description: 'Product updated' },
+    200: {
+      content: { 'application/json': { schema: ProductResponse } },
+      description: 'Product updated',
+    },
     404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not found' },
   },
 });
@@ -286,30 +319,33 @@ app.openapi(updateProduct, async (c) => {
   const variants = await db.query<any>(`SELECT * FROM variants WHERE product_id = ?`, [id]);
   const images = await db.query<any>(
     `SELECT * FROM product_images WHERE product_id = ? ORDER BY position ASC`,
-    [id]
+    [id],
   );
 
-  return c.json({
-    id: product.id,
-    title: product.title,
-    slug: product.slug || slugify(product.title),
-    description: product.description,
-    image_url: product.image_url || null,
-    status: product.status,
-    images: images.map((img) => ({
-      id: img.id,
-      image_url: img.image_url,
-      position: img.position,
-    })),
-    created_at: product.created_at,
-    variants: variants.map((v) => ({
-      id: v.id,
-      sku: v.sku,
-      title: v.title,
-      price_cents: v.price_cents,
-      image_url: v.image_url,
-    })),
-  }, 200);
+  return c.json(
+    {
+      id: product.id,
+      title: product.title,
+      slug: product.slug || slugify(product.title),
+      description: product.description,
+      image_url: product.image_url || null,
+      status: product.status,
+      images: images.map((img) => ({
+        id: img.id,
+        image_url: img.image_url,
+        position: img.position,
+      })),
+      created_at: product.created_at,
+      variants: variants.map((v) => ({
+        id: v.id,
+        sku: v.sku,
+        title: v.title,
+        price_cents: v.price_cents,
+        image_url: v.image_url,
+      })),
+    },
+    200,
+  );
 });
 
 const deleteProduct = createRoute({
@@ -321,9 +357,15 @@ const deleteProduct = createRoute({
   middleware: [adminOnly] as const,
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: DeletedResponse } }, description: 'Product deleted' },
+    200: {
+      content: { 'application/json': { schema: DeletedResponse } },
+      description: 'Product deleted',
+    },
     404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cannot delete' },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cannot delete',
+    },
   },
 });
 
@@ -341,11 +383,13 @@ app.openapi(deleteProduct, async (c) => {
     const placeholders = skus.map(() => '?').join(',');
     const [orderItem] = await db.query<any>(
       `SELECT id FROM order_items WHERE sku IN (${placeholders}) LIMIT 1`,
-      skus
+      skus,
     );
 
     if (orderItem) {
-      throw ApiError.conflict('Cannot delete product with variants that have been ordered. Set status to draft instead.');
+      throw ApiError.conflict(
+        'Cannot delete product with variants that have been ordered. Set status to draft instead.',
+      );
     }
   }
 
@@ -372,9 +416,18 @@ const createVariant = createRoute({
     body: { content: { 'application/json': { schema: CreateVariantBody } } },
   },
   responses: {
-    201: { content: { 'application/json': { schema: VariantResponse } }, description: 'Variant created' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Product not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'SKU already exists' },
+    201: {
+      content: { 'application/json': { schema: VariantResponse } },
+      description: 'Variant created',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Product not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'SKU already exists',
+    },
   },
 });
 
@@ -394,12 +447,12 @@ app.openapi(createVariant, async (c) => {
 
   await db.run(
     `INSERT INTO variants (id, product_id, sku, title, price_cents, weight_grams, image_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, productId, sku, title, price_cents, 0, image_url || null, timestamp]
+    [id, productId, sku, title, price_cents, 0, image_url || null, timestamp],
   );
 
   await db.run(
     `INSERT INTO inventory (id, sku, on_hand, reserved, updated_at) VALUES (?, ?, 0, 0, ?)`,
-    [uuid(), sku, timestamp]
+    [uuid(), sku, timestamp],
   );
 
   return c.json({ id, sku, title, price_cents, image_url: image_url || null }, 201);
@@ -417,9 +470,15 @@ const updateVariant = createRoute({
     body: { content: { 'application/json': { schema: UpdateVariantBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: VariantResponse } }, description: 'Variant updated' },
+    200: {
+      content: { 'application/json': { schema: VariantResponse } },
+      description: 'Variant updated',
+    },
     404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'SKU already exists' },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'SKU already exists',
+    },
   },
 });
 
@@ -428,20 +487,20 @@ app.openapi(updateVariant, async (c) => {
   const body = c.req.valid('json');
   const db = getDb(c.var.db);
 
-  const [existing] = await db.query<any>(
-    `SELECT * FROM variants WHERE id = ? AND product_id = ?`,
-    [variantId, productId]
-  );
+  const [existing] = await db.query<any>(`SELECT * FROM variants WHERE id = ? AND product_id = ?`, [
+    variantId,
+    productId,
+  ]);
   if (!existing) throw ApiError.notFound('Variant not found');
 
   const updates: string[] = [];
   const params: unknown[] = [];
 
   if (body.sku !== undefined) {
-    const [existingSku] = await db.query<any>(
-      `SELECT * FROM variants WHERE sku = ? AND id != ?`,
-      [body.sku, variantId]
-    );
+    const [existingSku] = await db.query<any>(`SELECT * FROM variants WHERE sku = ? AND id != ?`, [
+      body.sku,
+      variantId,
+    ]);
     if (existingSku) throw ApiError.conflict(`SKU ${body.sku} already exists`);
 
     await db.run(`UPDATE inventory SET sku = ? WHERE sku = ?`, [body.sku, existing.sku]);
@@ -468,13 +527,16 @@ app.openapi(updateVariant, async (c) => {
 
   const [variant] = await db.query<any>(`SELECT * FROM variants WHERE id = ?`, [variantId]);
 
-  return c.json({
-    id: variant.id,
-    sku: variant.sku,
-    title: variant.title,
-    price_cents: variant.price_cents,
-    image_url: variant.image_url,
-  }, 200);
+  return c.json(
+    {
+      id: variant.id,
+      sku: variant.sku,
+      title: variant.title,
+      price_cents: variant.price_cents,
+      image_url: variant.image_url,
+    },
+    200,
+  );
 });
 
 const deleteVariant = createRoute({
@@ -486,9 +548,15 @@ const deleteVariant = createRoute({
   middleware: [adminOnly] as const,
   request: { params: VariantIdParam },
   responses: {
-    200: { content: { 'application/json': { schema: DeletedResponse } }, description: 'Variant deleted' },
+    200: {
+      content: { 'application/json': { schema: DeletedResponse } },
+      description: 'Variant deleted',
+    },
     404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cannot delete' },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cannot delete',
+    },
   },
 });
 
@@ -496,15 +564,19 @@ app.openapi(deleteVariant, async (c) => {
   const { id: productId, variantId } = c.req.valid('param');
   const db = getDb(c.var.db);
 
-  const [variant] = await db.query<any>(
-    `SELECT * FROM variants WHERE id = ? AND product_id = ?`,
-    [variantId, productId]
-  );
+  const [variant] = await db.query<any>(`SELECT * FROM variants WHERE id = ? AND product_id = ?`, [
+    variantId,
+    productId,
+  ]);
   if (!variant) throw ApiError.notFound('Variant not found');
 
-  const [orderItem] = await db.query<any>(`SELECT id FROM order_items WHERE sku = ? LIMIT 1`, [variant.sku]);
+  const [orderItem] = await db.query<any>(`SELECT id FROM order_items WHERE sku = ? LIMIT 1`, [
+    variant.sku,
+  ]);
   if (orderItem) {
-    throw ApiError.conflict('Cannot delete variant that has been ordered. Set product status to draft instead.');
+    throw ApiError.conflict(
+      'Cannot delete variant that has been ordered. Set product status to draft instead.',
+    );
   }
 
   await db.run(`DELETE FROM inventory WHERE sku = ?`, [variant.sku]);
@@ -518,14 +590,22 @@ app.openapi(deleteVariant, async (c) => {
 // ============================================================
 
 const ImageIdParam = z.object({
-  id: z.string().uuid().openapi({ param: { name: 'id', in: 'path' } }),
-  imageId: z.string().uuid().openapi({ param: { name: 'imageId', in: 'path' } }),
+  id: z
+    .string()
+    .uuid()
+    .openapi({ param: { name: 'id', in: 'path' } }),
+  imageId: z
+    .string()
+    .uuid()
+    .openapi({ param: { name: 'imageId', in: 'path' } }),
 });
 
-const CreateProductImageBody = z.object({
-  image_url: z.string().url().openapi({ example: 'https://example.com/image.jpg' }),
-  position: z.number().int().min(0).optional().openapi({ example: 0 }),
-}).openapi('CreateProductImage');
+const CreateProductImageBody = z
+  .object({
+    image_url: z.string().url().openapi({ example: 'https://example.com/image.jpg' }),
+    position: z.number().int().min(0).optional().openapi({ example: 0 }),
+  })
+  .openapi('CreateProductImage');
 
 const addProductImage = createRoute({
   method: 'post',
@@ -539,8 +619,14 @@ const addProductImage = createRoute({
     body: { content: { 'application/json': { schema: CreateProductImageBody } } },
   },
   responses: {
-    201: { content: { 'application/json': { schema: ProductImageResponse } }, description: 'Image added' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Product not found' },
+    201: {
+      content: { 'application/json': { schema: ProductImageResponse } },
+      description: 'Image added',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Product not found',
+    },
   },
 });
 
@@ -560,14 +646,14 @@ app.openapi(addProductImage, async (c) => {
   if (pos === undefined) {
     const [maxPos] = await db.query<any>(
       `SELECT COALESCE(MAX(position), -1) as max_pos FROM product_images WHERE product_id = ?`,
-      [productId]
+      [productId],
     );
     pos = (maxPos?.max_pos ?? -1) + 1;
   }
 
   await db.run(
     `INSERT INTO product_images (id, product_id, image_url, position, created_at) VALUES (?, ?, ?, ?, ?)`,
-    [id, productId, image_url, pos, timestamp]
+    [id, productId, image_url, pos, timestamp],
   );
 
   return c.json({ id, image_url, position: pos as number }, 201);
@@ -582,7 +668,10 @@ const deleteProductImage = createRoute({
   middleware: [adminOnly] as const,
   request: { params: ImageIdParam },
   responses: {
-    200: { content: { 'application/json': { schema: DeletedResponse } }, description: 'Image deleted' },
+    200: {
+      content: { 'application/json': { schema: DeletedResponse } },
+      description: 'Image deleted',
+    },
     404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Not found' },
   },
 });
@@ -593,7 +682,7 @@ app.openapi(deleteProductImage, async (c) => {
 
   const [image] = await db.query<any>(
     `SELECT * FROM product_images WHERE id = ? AND product_id = ?`,
-    [imageId, productId]
+    [imageId, productId],
   );
   if (!image) throw ApiError.notFound('Product image not found');
 

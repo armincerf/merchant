@@ -1,8 +1,7 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
-import { z } from '@hono/zod-openapi';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { ApiError, uuid, type HonoEnv } from '../types';
-import { ImageUploadResponse, ErrorResponse, OkResponse } from '../schemas';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { adminOnly, authMiddleware } from '../middleware/auth';
+import { ErrorResponse, ImageUploadResponse, OkResponse } from '../schemas';
+import { ApiError, type HonoEnv, uuid } from '../types';
 
 const ImageKeyParam = z.object({
   key: z.string().openapi({ param: { name: 'key', in: 'path' }, example: 'abc123.jpg' }),
@@ -29,8 +28,14 @@ const uploadImage = createRoute({
     },
   },
   responses: {
-    200: { content: { 'application/json': { schema: ImageUploadResponse } }, description: 'Image uploaded' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid file' },
+    200: {
+      content: { 'application/json': { schema: ImageUploadResponse } },
+      description: 'Image uploaded',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid file',
+    },
   },
 });
 
@@ -74,7 +79,10 @@ const getImage = createRoute({
   request: { params: ImageKeyParam },
   responses: {
     200: { description: 'Image binary' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Image not found' },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Image not found',
+    },
   },
 });
 
@@ -107,7 +115,10 @@ const deleteImage = createRoute({
   request: { params: ImageKeyParam },
   responses: {
     200: { content: { 'application/json': { schema: OkResponse } }, description: 'Image deleted' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
   },
 });
 

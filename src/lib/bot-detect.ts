@@ -8,7 +8,8 @@
  * browsers always send a UA string).
  */
 
-const BOT_PATTERN = /Googlebot|Bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|Sogou|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|Applebot|AhrefsBot|SemrushBot|DotBot|MJ12bot|crawler|spider|bot|headless|phantom|puppeteer|lighthouse|pagespeed/i;
+const BOT_PATTERN =
+  /Googlebot|Bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|Sogou|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|Applebot|AhrefsBot|SemrushBot|DotBot|MJ12bot|crawler|spider|bot|headless|phantom|puppeteer|lighthouse|pagespeed/i;
 
 /**
  * Returns `true` when the given User-Agent string looks like a bot, crawler,
@@ -18,7 +19,7 @@ const BOT_PATTERN = /Googlebot|Bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|S
  * @returns Whether the request likely originates from a bot.
  */
 export function isBot(userAgent: string | undefined | null): boolean {
-  if (!userAgent || userAgent.trim() === "") {
+  if (!userAgent || userAgent.trim() === '') {
     return true;
   }
 

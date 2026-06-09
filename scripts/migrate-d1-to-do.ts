@@ -1,7 +1,7 @@
 #!/usr/bin/env npx tsx
 
-import { execSync } from 'child_process';
-import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { execSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const TABLES = [
   'api_keys',
@@ -83,7 +83,7 @@ async function exportD1() {
   for (const table of TABLES) {
     try {
       const result = run(
-        `npx wrangler d1 execute ${dbName} ${remoteFlag} --json --command "SELECT * FROM ${table}"`
+        `npx wrangler d1 execute ${dbName} ${remoteFlag} --json --command "SELECT * FROM ${table}"`,
       );
       const parsed = JSON.parse(result);
       const rows = parsed[0]?.results || [];
@@ -109,7 +109,9 @@ async function exportD1() {
 
   if (totalRows > 0) {
     console.log(`Next step: Import this data to the new DO-based deployment:`);
-    console.log(`   npx tsx scripts/migrate-d1-to-do.ts import --file=${outputFile} --key=sk_...\n`);
+    console.log(
+      `   npx tsx scripts/migrate-d1-to-do.ts import --file=${outputFile} --key=sk_...\n`,
+    );
   }
 }
 

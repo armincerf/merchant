@@ -1,5 +1,5 @@
 import { Context, Next } from 'hono';
-import { rateLimits, getLimitForRequest, type RateLimitConfig } from '../config/rate-limits';
+import { getLimitForRequest, type RateLimitConfig, rateLimits } from '../config/rate-limits';
 import { ApiError, type Env } from '../types';
 
 // ============================================================
@@ -43,7 +43,7 @@ function getWindowStart(windowMs: number): number {
 
 function checkRateLimit(
   identifier: string,
-  config: RateLimitConfig
+  config: RateLimitConfig,
 ): { allowed: boolean; remaining: number; resetAt: number } {
   cleanup();
 
@@ -115,7 +115,7 @@ export function rateLimitMiddleware() {
       throw new ApiError(
         'rate_limit_exceeded',
         429,
-        `Rate limit exceeded. Try again in ${retryAfter} seconds.`
+        `Rate limit exceeded. Try again in ${retryAfter} seconds.`,
       );
     }
 
@@ -141,6 +141,3 @@ export function getRateLimitStatus(identifier: string, config: RateLimitConfig) 
     window_reset_at: new Date(windowStart + config.windowMs).toISOString(),
   };
 }
-
-
-

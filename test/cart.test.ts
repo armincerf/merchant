@@ -11,8 +11,8 @@
  *  - checkout endpoint blocked when Stripe not configured
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
-import { seedStore, authedFetch, jsonBody, type SeedResult } from './helpers';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { authedFetch, jsonBody, type SeedResult, seedStore } from './helpers';
 
 let seed: SeedResult;
 

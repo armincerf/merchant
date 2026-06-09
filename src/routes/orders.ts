@@ -1,21 +1,21 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { getDb } from '../db';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { ApiError, uuid, now, generateOrderNumber, type HonoEnv } from '../types';
-import { validateDiscount, calculateDiscount, type Discount } from './discounts';
 import { dispatchWebhooks, type WebhookEventType } from '../lib/webhooks';
+import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
-  OrderIdParam,
-  OrderResponse,
-  OrderListResponse,
-  OrderQuery,
-  UpdateOrderBody,
-  RefundOrderBody,
-  RefundResponse,
   CreateTestOrderBody,
   ErrorResponse,
+  OrderIdParam,
+  OrderListResponse,
+  OrderQuery,
+  OrderResponse,
+  RefundOrderBody,
+  RefundResponse,
+  UpdateOrderBody,
 } from '../schemas';
+import { ApiError, generateOrderNumber, type HonoEnv, now, uuid } from '../types';
+import { calculateDiscount, type Discount, validateDiscount } from './discounts';
 
 const app = new OpenAPIHono<HonoEnv>();
 
@@ -31,14 +31,17 @@ const listOrders = createRoute({
   middleware: [adminOnly] as const,
   request: { query: OrderQuery },
   responses: {
-    200: { content: { 'application/json': { schema: OrderListResponse } }, description: 'List of orders' },
+    200: {
+      content: { 'application/json': { schema: OrderListResponse } },
+      description: 'List of orders',
+    },
   },
 });
 
 app.openapi(listOrders, async (c) => {
   const db = getDb(c.var.db);
   const { limit: limitStr, cursor, status, email } = c.req.valid('query');
-  const limit = Math.min(parseInt(limitStr || '20'), 100);
+  const limit = Math.min(parseInt(limitStr || '20', 10), 100);
 
   let query = `SELECT * FROM orders WHERE 1=1`;
   const params: unknown[] = [];
@@ -74,7 +77,7 @@ app.openapi(listOrders, async (c) => {
     const placeholders = orderIds.map(() => '?').join(',');
     const allItems = await db.query<any>(
       `SELECT * FROM order_items WHERE order_id IN (${placeholders})`,
-      orderIds
+      orderIds,
     );
 
     for (const item of allItems) {
@@ -101,8 +104,14 @@ const getOrder = createRoute({
   middleware: [adminOnly] as const,
   request: { params: OrderIdParam },
   responses: {
-    200: { content: { 'application/json': { schema: OrderResponse } }, description: 'Order details' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Order not found' },
+    200: {
+      content: { 'application/json': { schema: OrderResponse } },
+      description: 'Order details',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Order not found',
+    },
   },
 });
 
@@ -113,7 +122,9 @@ app.openapi(getOrder, async (c) => {
   const [order] = await db.query<any>(`SELECT * FROM orders WHERE id = ?`, [orderId]);
   if (!order) throw ApiError.notFound('Order not found');
 
-  const orderItems = await db.query<any>(`SELECT * FROM order_items WHERE order_id = ?`, [order.id]);
+  const orderItems = await db.query<any>(`SELECT * FROM order_items WHERE order_id = ?`, [
+    order.id,
+  ]);
 
   return c.json(formatOrder(order, orderItems), 200);
 });
@@ -130,9 +141,18 @@ const updateOrder = createRoute({
     body: { content: { 'application/json': { schema: UpdateOrderBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: OrderResponse } }, description: 'Updated order' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Order not found' },
+    200: {
+      content: { 'application/json': { schema: OrderResponse } },
+      description: 'Updated order',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Order not found',
+    },
   },
 });
 
@@ -204,10 +224,22 @@ const refundOrder = createRoute({
     body: { content: { 'application/json': { schema: RefundOrderBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: RefundResponse } }, description: 'Refund result' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request or Stripe error' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Order not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Already refunded' },
+    200: {
+      content: { 'application/json': { schema: RefundResponse } },
+      description: 'Refund result',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request or Stripe error',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Order not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Already refunded',
+    },
   },
 });
 
@@ -237,14 +269,16 @@ app.openapi(refundOrder, async (c) => {
 
     await db.run(
       `INSERT INTO refunds (id, order_id, stripe_refund_id, amount_cents, status) VALUES (?, ?, ?, ?, ?)`,
-      [uuid(), order.id, refund.id, refund.amount, refund.status ?? 'succeeded']
+      [uuid(), order.id, refund.id, refund.amount, refund.status ?? 'succeeded'],
     );
 
     if (!amount_cents || amount_cents >= order.total_cents) {
       await db.run(`UPDATE orders SET status = 'refunded' WHERE id = ?`, [orderId]);
 
       const [refundedOrder] = await db.query<any>(`SELECT * FROM orders WHERE id = ?`, [orderId]);
-      const orderItems = await db.query<any>(`SELECT * FROM order_items WHERE order_id = ?`, [orderId]);
+      const orderItems = await db.query<any>(`SELECT * FROM order_items WHERE order_id = ?`, [
+        orderId,
+      ]);
 
       await dispatchWebhooks(c.var.db, c.executionCtx, 'order.refunded', {
         order: formatOrder(refundedOrder, orderItems),
@@ -270,9 +304,18 @@ const createTestOrder = createRoute({
     body: { content: { 'application/json': { schema: CreateTestOrderBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: OrderResponse } }, description: 'Created order' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'SKU or discount not found' },
+    200: {
+      content: { 'application/json': { schema: OrderResponse } },
+      description: 'Created order',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'SKU or discount not found',
+    },
   },
 });
 
@@ -307,7 +350,9 @@ app.openapi(createTestOrder, async (c) => {
 
   if (discount_code) {
     const normalizedCode = discount_code.toUpperCase().trim();
-    const [discountRow] = await db.query<any>(`SELECT * FROM discounts WHERE code = ?`, [normalizedCode]);
+    const [discountRow] = await db.query<any>(`SELECT * FROM discounts WHERE code = ?`, [
+      normalizedCode,
+    ]);
 
     if (discountRow) {
       await validateDiscount(db, discountRow as Discount, subtotal, customer_email);
@@ -326,7 +371,7 @@ app.openapi(createTestOrder, async (c) => {
 
   const [existingCustomer] = await db.query<any>(
     `SELECT id, order_count, total_spent_cents FROM customers WHERE email = ?`,
-    [customer_email]
+    [customer_email],
   );
 
   if (existingCustomer) {
@@ -338,14 +383,14 @@ app.openapi(createTestOrder, async (c) => {
         last_order_at = ?,
         updated_at = ?
       WHERE id = ?`,
-      [totalCents, timestamp, timestamp, customerId]
+      [totalCents, timestamp, timestamp, customerId],
     );
   } else {
     customerId = uuid();
     await db.run(
       `INSERT INTO customers (id, email, order_count, total_spent_cents, last_order_at)
        VALUES (?, ?, 1, ?, ?)`,
-      [customerId, customer_email, totalCents, timestamp]
+      [customerId, customer_email, totalCents, timestamp],
     );
   }
 
@@ -355,7 +400,7 @@ app.openapi(createTestOrder, async (c) => {
     if (discount.usage_limit_per_customer !== null) {
       const [usage] = await db.query<any>(
         `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
-        [discount.id, customer_email.toLowerCase()]
+        [discount.id, customer_email.toLowerCase()],
       );
       if (usage && usage.count >= discount.usage_limit_per_customer) {
         throw ApiError.invalidRequest('You have already used this discount');
@@ -371,7 +416,7 @@ app.openapi(createTestOrder, async (c) => {
            AND (starts_at IS NULL OR starts_at <= ?)
            AND (expires_at IS NULL OR expires_at >= ?)
            AND usage_count < usage_limit`,
-        [currentTime, discountId, currentTime, currentTime]
+        [currentTime, discountId, currentTime, currentTime],
       );
 
       if (result.changes === 0) {
@@ -385,7 +430,7 @@ app.openapi(createTestOrder, async (c) => {
            AND status = 'active'
            AND (starts_at IS NULL OR starts_at <= ?)
            AND (expires_at IS NULL OR expires_at >= ?)`,
-        [currentTime, discountId, currentTime, currentTime]
+        [currentTime, discountId, currentTime, currentTime],
       );
 
       if (result.changes === 0) {
@@ -400,34 +445,43 @@ app.openapi(createTestOrder, async (c) => {
   await db.run(
     `INSERT INTO orders (id, customer_id, number, status, customer_email, subtotal_cents, tax_cents, shipping_cents, total_cents, discount_code, discount_id, discount_amount_cents, created_at)
      VALUES (?, ?, ?, 'paid', ?, ?, 0, 0, ?, ?, ?, ?, ?)`,
-    [orderId, customerId, orderNumber, customer_email, subtotal, totalCents, discountCode, discountId, discountAmountCents, timestamp]
+    [
+      orderId,
+      customerId,
+      orderNumber,
+      customer_email,
+      subtotal,
+      totalCents,
+      discountCode,
+      discountId,
+      discountAmountCents,
+      timestamp,
+    ],
   );
 
   for (const item of orderItems) {
     await db.run(
       `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents]
+      [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents],
     );
 
-    await db.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`, [
-      item.qty,
-      item.qty,
-      timestamp,
-      item.sku,
-    ]);
+    await db.run(
+      `UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`,
+      [item.qty, item.qty, timestamp, item.sku],
+    );
   }
 
   if (discount && discountAmountCents > 0) {
     const [existingUsage] = await db.query<any>(
       `SELECT id FROM discount_usage WHERE order_id = ? AND discount_id = ?`,
-      [orderId, discountId]
+      [orderId, discountId],
     );
 
     if (!existingUsage) {
       await db.run(
         `INSERT INTO discount_usage (id, discount_id, order_id, customer_email, discount_amount_cents)
          VALUES (?, ?, ?, ?, ?)`,
-        [uuid(), discountId, orderId, customer_email.toLowerCase(), discountAmountCents]
+        [uuid(), discountId, orderId, customer_email.toLowerCase(), discountAmountCents],
       );
     }
   }

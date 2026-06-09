@@ -1,5 +1,5 @@
-import { getDb, type Database } from '../db';
-import { uuid, now, type DOStub } from '../types';
+import { getDb } from '../db';
+import { type DOStub, now, uuid } from '../types';
 
 export type WebhookEventType =
   | 'order.created'
@@ -25,7 +25,7 @@ async function signPayload(payload: string, secret: string): Promise<string> {
     encoder.encode(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
-    ['sign']
+    ['sign'],
   );
   const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
   return Array.from(new Uint8Array(signature))
@@ -48,7 +48,7 @@ export async function dispatchWebhooks(
   stub: DOStub,
   ctx: ExecutionContext,
   eventType: WebhookEventType,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
 ): Promise<void> {
   const db = getDb(stub);
 
@@ -67,7 +67,7 @@ export async function dispatchWebhooks(
       if (e === eventType) return true;
       if (e.endsWith('.*')) {
         const prefix = e.slice(0, -2);
-        return eventType.startsWith(prefix + '.');
+        return eventType.startsWith(`${prefix}.`);
       }
       return false;
     });
@@ -85,11 +85,11 @@ export async function dispatchWebhooks(
     await db.run(
       `INSERT INTO webhook_deliveries (id, webhook_id, event_type, payload, status, created_at)
        VALUES (?, ?, ?, ?, 'pending', ?)`,
-      [deliveryId, webhook.id, eventType, JSON.stringify(payload), now()]
+      [deliveryId, webhook.id, eventType, JSON.stringify(payload), now()],
     );
 
     ctx.waitUntil(
-      deliverWebhook(stub, webhook.id, webhook.url, webhook.secret, deliveryId, payload)
+      deliverWebhook(stub, webhook.id, webhook.url, webhook.secret, deliveryId, payload),
     );
   }
 }
@@ -100,7 +100,7 @@ async function deliverWebhook(
   url: string,
   secret: string,
   deliveryId: string,
-  payload: WebhookPayload
+  payload: WebhookPayload,
 ): Promise<void> {
   const db = getDb(stub);
   const payloadString = JSON.stringify(payload);
@@ -139,7 +139,7 @@ async function deliverWebhook(
           `UPDATE webhook_deliveries 
            SET status = 'success', response_code = ?, response_body = ? 
            WHERE id = ?`,
-          [responseCode, responseBody?.slice(0, 1000), deliveryId]
+          [responseCode, responseBody?.slice(0, 1000), deliveryId],
         );
         return;
       }
@@ -149,7 +149,7 @@ async function deliverWebhook(
           `UPDATE webhook_deliveries 
            SET status = 'failed', response_code = ?, response_body = ? 
            WHERE id = ?`,
-          [responseCode, responseBody?.slice(0, 1000), deliveryId]
+          [responseCode, responseBody?.slice(0, 1000), deliveryId],
         );
         return;
       }
@@ -160,7 +160,7 @@ async function deliverWebhook(
     }
 
     if (attempt < MAX_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 1000));
+      await new Promise((r) => setTimeout(r, 2 ** attempt * 1000));
     }
   }
 
@@ -168,14 +168,14 @@ async function deliverWebhook(
     `UPDATE webhook_deliveries 
      SET status = 'failed', response_code = ?, response_body = ? 
      WHERE id = ?`,
-    [responseCode, lastError?.message?.slice(0, 1000) || responseBody?.slice(0, 1000), deliveryId]
+    [responseCode, lastError?.message?.slice(0, 1000) || responseBody?.slice(0, 1000), deliveryId],
   );
 }
 
 export async function retryDelivery(
   stub: DOStub,
   webhook: { id: string; url: string; secret: string },
-  delivery: { id: string; payload: string }
+  delivery: { id: string; payload: string },
 ): Promise<void> {
   const payload = JSON.parse(delivery.payload);
   await deliverWebhook(stub, webhook.id, webhook.url, webhook.secret, delivery.id, payload);
@@ -185,7 +185,7 @@ export async function checkLowInventory(
   stub: DOStub,
   ctx: ExecutionContext,
   sku: string,
-  available: number
+  available: number,
 ): Promise<void> {
   if (available <= LOW_INVENTORY_THRESHOLD && available >= 0) {
     await dispatchWebhooks(stub, ctx, 'inventory.low', {
@@ -213,13 +213,13 @@ export async function retryFailedDeliveries(stub: DOStub, ctx: ExecutionContext)
        AND w.status = 'active'
        AND wd.created_at > datetime('now', '-24 hours')
      LIMIT 50`,
-    [MAX_ATTEMPTS]
+    [MAX_ATTEMPTS],
   );
 
   for (const delivery of failed) {
     const [webhook] = await db.query<{ url: string; secret: string }>(
       `SELECT url, secret FROM webhooks WHERE id = ?`,
-      [delivery.webhook_id]
+      [delivery.webhook_id],
     );
 
     if (webhook) {
@@ -232,8 +232,8 @@ export async function retryFailedDeliveries(stub: DOStub, ctx: ExecutionContext)
           webhook.url,
           webhook.secret,
           delivery.id,
-          JSON.parse(delivery.payload)
-        )
+          JSON.parse(delivery.payload),
+        ),
       );
     }
   }

@@ -1,18 +1,17 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
-import { z } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { ApiError, uuid, now, type HonoEnv } from '../types';
 import { checkLowInventory } from '../lib/webhooks';
+import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
-  InventoryQuery,
-  InventoryListResponse,
-  InventoryItem,
-  SkuParam,
   AdjustInventoryBody,
   AvailabilityResponse,
   ErrorResponse,
+  InventoryItem,
+  InventoryListResponse,
+  InventoryQuery,
+  SkuParam,
 } from '../schemas';
+import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 const app = new OpenAPIHono<HonoEnv>();
 
@@ -22,7 +21,8 @@ const getAvailability = createRoute({
   path: '/available',
   tags: ['Inventory'],
   summary: 'Get available stock for SKUs (public)',
-  description: 'Returns available quantity (on_hand - reserved) for the given SKUs. No authentication required.',
+  description:
+    'Returns available quantity (on_hand - reserved) for the given SKUs. No authentication required.',
   request: {
     query: z.object({
       skus: z.string().openapi({ param: { name: 'skus', in: 'query' }, example: 'SKU1,SKU2' }),
@@ -40,7 +40,10 @@ app.openapi(getAvailability, async (c) => {
   const { skus: skusParam } = c.req.valid('query');
   const db = getDb(c.var.db);
 
-  const skuList = skusParam.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+  const skuList = skusParam
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
   if (skuList.length === 0) {
     return c.json({ items: [] }, 200);
   }
@@ -48,7 +51,7 @@ app.openapi(getAvailability, async (c) => {
   const placeholders = skuList.map(() => '?').join(',');
   const rows = await db.query<any>(
     `SELECT sku, on_hand, reserved FROM inventory WHERE sku IN (${placeholders})`,
-    skuList
+    skuList,
   );
 
   const rowMap = new Map(rows.map((r) => [r.sku, r]));
@@ -101,25 +104,30 @@ app.openapi(listInventory, async (c) => {
        LEFT JOIN variants v ON i.sku = v.sku
        LEFT JOIN products p ON v.product_id = p.id
        WHERE i.sku = ?`,
-      [sku]
+      [sku],
     );
 
     if (!level) throw ApiError.notFound('SKU not found');
 
-    return c.json({
-      items: [{
-        sku: level.sku,
-        on_hand: level.on_hand,
-        reserved: level.reserved,
-        available: level.on_hand - level.reserved,
-        variant_title: level.variant_title,
-        product_title: level.product_title,
-      }],
-      pagination: { has_more: false, next_cursor: null },
-    }, 200);
+    return c.json(
+      {
+        items: [
+          {
+            sku: level.sku,
+            on_hand: level.on_hand,
+            reserved: level.reserved,
+            available: level.on_hand - level.reserved,
+            variant_title: level.variant_title,
+            product_title: level.product_title,
+          },
+        ],
+        pagination: { has_more: false, next_cursor: null },
+      },
+      200,
+    );
   }
 
-  const limit = Math.min(parseInt(limitStr || '100'), 500);
+  const limit = Math.min(parseInt(limitStr || '100', 10), 500);
   const lowStock = low_stock === 'true';
 
   let query = `SELECT i.*, v.title as variant_title, p.title as product_title
@@ -151,20 +159,23 @@ app.openapi(listInventory, async (c) => {
 
   const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].sku : null;
 
-  return c.json({
-    items: items.map((i) => ({
-      sku: i.sku,
-      on_hand: i.on_hand,
-      reserved: i.reserved,
-      available: i.on_hand - i.reserved,
-      variant_title: i.variant_title,
-      product_title: i.product_title,
-    })),
-    pagination: {
-      has_more: hasMore,
-      next_cursor: nextCursor,
+  return c.json(
+    {
+      items: items.map((i) => ({
+        sku: i.sku,
+        on_hand: i.on_hand,
+        reserved: i.reserved,
+        available: i.on_hand - i.reserved,
+        variant_title: i.variant_title,
+        product_title: i.product_title,
+      })),
+      pagination: {
+        has_more: hasMore,
+        next_cursor: nextCursor,
+      },
     },
-  }, 200);
+    200,
+  );
 });
 
 const adjustInventory = createRoute({
@@ -205,19 +216,22 @@ app.openapi(adjustInventory, async (c) => {
 
   if (delta < 0 && existing.on_hand + delta < 0) {
     throw ApiError.invalidRequest(
-      `Cannot reduce inventory below 0. Current on_hand: ${existing.on_hand}`
+      `Cannot reduce inventory below 0. Current on_hand: ${existing.on_hand}`,
     );
   }
 
-  await db.run(
-    `UPDATE inventory SET on_hand = on_hand + ?, updated_at = ? WHERE sku = ?`,
-    [delta, now(), sku]
-  );
+  await db.run(`UPDATE inventory SET on_hand = on_hand + ?, updated_at = ? WHERE sku = ?`, [
+    delta,
+    now(),
+    sku,
+  ]);
 
-  await db.run(
-    `INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, ?)`,
-    [uuid(), sku, delta, reason]
-  );
+  await db.run(`INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, ?)`, [
+    uuid(),
+    sku,
+    delta,
+    reason,
+  ]);
 
   const [level] = await db.query<any>(`SELECT * FROM inventory WHERE sku = ?`, [sku]);
 
@@ -232,12 +246,15 @@ app.openapi(adjustInventory, async (c) => {
     timestamp: new Date().toISOString(),
   });
 
-  return c.json({
-    sku: level.sku,
-    on_hand: level.on_hand,
-    reserved: level.reserved,
-    available,
-  }, 200);
+  return c.json(
+    {
+      sku: level.sku,
+      on_hand: level.on_hand,
+      reserved: level.reserved,
+      available,
+    },
+    200,
+  );
 });
 
 export { app as inventory };

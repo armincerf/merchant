@@ -19,10 +19,10 @@
  * cart operations even if they haven't been called before.
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
 import { runInDurableObject } from 'cloudflare:test';
-import { seedStore, authedFetch, jsonBody, type SeedResult } from './helpers';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { MerchantDO } from '../src/do';
+import { authedFetch, jsonBody, type SeedResult, seedStore } from './helpers';
 
 let seed: SeedResult;
 // Shared cart used by the application suite — seeded once in beforeAll
@@ -189,14 +189,13 @@ describe('discount application to cart', () => {
     const { id, code } = await createDiscount({ usage_limit: 1 });
 
     // Directly set usage_count to equal usage_limit via DO RPC
-    const env = (await import('cloudflare:workers')).env as { MERCHANT: DurableObjectNamespace<MerchantDO> };
+    const env = (await import('cloudflare:workers')).env as {
+      MERCHANT: DurableObjectNamespace<MerchantDO>;
+    };
     const doId = env.MERCHANT.idFromName('default');
     const stub = env.MERCHANT.get(doId);
     await runInDurableObject(stub, async (instance: MerchantDO) => {
-      instance.run(
-        `UPDATE discounts SET usage_count = usage_limit WHERE id = ?`,
-        [id]
-      );
+      instance.run(`UPDATE discounts SET usage_count = usage_limit WHERE id = ?`, [id]);
     });
 
     const res = await applyToSharedCart(code);

@@ -430,7 +430,9 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
   run(sql: string, params: unknown[] = []): { changes: number } {
     this.ensureInitialized();
     this.sql.exec(sql, ...params);
-    const [result] = this.sql.exec('SELECT changes() as changes').toArray() as [{ changes: number }];
+    const [result] = this.sql.exec('SELECT changes() as changes').toArray() as [
+      { changes: number },
+    ];
     return { changes: result.changes };
   }
 
@@ -532,7 +534,11 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     const eventTopic = event.type.split('.')[0];
 
     for (const [ws, session] of this.sessions) {
-      if (session.topics.has('*') || session.topics.has(eventTopic) || session.topics.has(event.type)) {
+      if (
+        session.topics.has('*') ||
+        session.topics.has(eventTopic) ||
+        session.topics.has(event.type)
+      ) {
         try {
           ws.send(message);
         } catch {
@@ -549,7 +555,7 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
 
     const expiredCarts = this.query<{ id: string }>(
       `SELECT id FROM carts WHERE status = 'open' AND expires_at < ?`,
-      [now]
+      [now],
     );
 
     if (expiredCarts.length === 0) return 0;
@@ -559,14 +565,17 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
 
     const reservedItems = this.query<{ sku: string; qty: number }>(
       `SELECT sku, SUM(qty) as qty FROM cart_items WHERE cart_id IN (${placeholders}) GROUP BY sku`,
-      cartIds
+      cartIds,
     );
 
     try {
       this.sql.exec('BEGIN');
 
       for (const item of reservedItems) {
-        this.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [item.qty, item.sku]);
+        this.run(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [
+          item.qty,
+          item.sku,
+        ]);
       }
 
       this.run(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
@@ -582,7 +591,7 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     for (const item of reservedItems) {
       const [inv] = this.query<{ on_hand: number; reserved: number }>(
         `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
-        [item.sku]
+        [item.sku],
       );
       const available = inv ? Math.max(0, inv.on_hand - inv.reserved) : 0;
       this.broadcast({

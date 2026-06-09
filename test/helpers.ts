@@ -81,10 +81,12 @@ export async function seedStore(): Promise<SeedResult> {
   });
 
   if (!productRes.ok) {
-    throw new Error(`seedStore: create product failed ${productRes.status}: ${await productRes.text()}`);
+    throw new Error(
+      `seedStore: create product failed ${productRes.status}: ${await productRes.text()}`,
+    );
   }
 
-  const product = await productRes.json() as { id: string };
+  const product = (await productRes.json()) as { id: string };
 
   // Create a variant with SKU
   const sku = `SKU-${Date.now()}`;
@@ -98,10 +100,12 @@ export async function seedStore(): Promise<SeedResult> {
   });
 
   if (!variantRes.ok) {
-    throw new Error(`seedStore: create variant failed ${variantRes.status}: ${await variantRes.text()}`);
+    throw new Error(
+      `seedStore: create variant failed ${variantRes.status}: ${await variantRes.text()}`,
+    );
   }
 
-  const variant = await variantRes.json() as { id: string };
+  const variant = (await variantRes.json()) as { id: string };
 
   // Adjust inventory to 10 units
   const invRes = await SELF.fetch(`http://example.com/v1/inventory/${sku}/adjust`, {
@@ -122,11 +126,7 @@ export async function seedStore(): Promise<SeedResult> {
 
 // ── Request helpers ──────────────────────────────────────────────────────────
 
-export function authedFetch(
-  url: string,
-  key: string,
-  init: RequestInit = {}
-): Promise<Response> {
+export function authedFetch(url: string, key: string, init: RequestInit = {}): Promise<Response> {
   return SELF.fetch(`http://example.com${url}`, {
     ...init,
     headers: {

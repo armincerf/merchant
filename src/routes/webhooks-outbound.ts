@@ -1,23 +1,23 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
 import { getDb } from '../db';
-import { authMiddleware, adminOnly } from '../middleware/auth';
-import { ApiError, uuid, now, type HonoEnv } from '../types';
 import { generateWebhookSecret, retryDelivery } from '../lib/webhooks';
+import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
-  IdParam,
-  WebhookResponse,
-  WebhookWithSecret,
-  WebhookListResponse,
-  WebhookDetailResponse,
   CreateWebhookBody,
+  DeletedResponse,
+  DeliveryIdParam,
+  ErrorResponse,
+  IdParam,
+  RetryResponse,
+  RotateSecretResponse,
   UpdateWebhookBody,
   WebhookDeliveryResponse,
-  DeliveryIdParam,
-  RotateSecretResponse,
-  RetryResponse,
-  ErrorResponse,
-  DeletedResponse,
+  WebhookDetailResponse,
+  WebhookListResponse,
+  WebhookResponse,
+  WebhookWithSecret,
 } from '../schemas';
+import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 const VALID_EVENTS = [
   'order.created',
@@ -41,7 +41,10 @@ const listWebhooks = createRoute({
   security: [{ bearerAuth: [] }],
   middleware: [adminOnly] as const,
   responses: {
-    200: { content: { 'application/json': { schema: WebhookListResponse } }, description: 'List of webhooks' },
+    200: {
+      content: { 'application/json': { schema: WebhookListResponse } },
+      description: 'List of webhooks',
+    },
   },
 });
 
@@ -50,16 +53,19 @@ app.openapi(listWebhooks, async (c) => {
 
   const webhooks = await db.query<any>(`SELECT * FROM webhooks ORDER BY created_at DESC`, []);
 
-  return c.json({
-    items: webhooks.map((w) => ({
-      id: w.id,
-      url: w.url,
-      events: JSON.parse(w.events),
-      status: w.status,
-      created_at: w.created_at,
-      has_secret: Boolean(w.secret),
-    })),
-  }, 200);
+  return c.json(
+    {
+      items: webhooks.map((w) => ({
+        id: w.id,
+        url: w.url,
+        events: JSON.parse(w.events),
+        status: w.status,
+        created_at: w.created_at,
+        has_secret: Boolean(w.secret),
+      })),
+    },
+    200,
+  );
 });
 
 const getWebhook = createRoute({
@@ -71,8 +77,14 @@ const getWebhook = createRoute({
   middleware: [adminOnly] as const,
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: WebhookDetailResponse } }, description: 'Webhook details with deliveries' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Webhook not found' },
+    200: {
+      content: { 'application/json': { schema: WebhookDetailResponse } },
+      description: 'Webhook details with deliveries',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Webhook not found',
+    },
   },
 });
 
@@ -89,26 +101,29 @@ app.openapi(getWebhook, async (c) => {
      WHERE webhook_id = ? 
      ORDER BY created_at DESC 
      LIMIT 20`,
-    [id]
+    [id],
   );
 
-  return c.json({
-    id: webhook.id,
-    url: webhook.url,
-    events: JSON.parse(webhook.events),
-    status: webhook.status,
-    created_at: webhook.created_at,
-    has_secret: Boolean(webhook.secret),
-    recent_deliveries: deliveries.map((d) => ({
-      id: d.id,
-      event_type: d.event_type,
-      status: d.status,
-      attempts: d.attempts,
-      response_code: d.response_code,
-      created_at: d.created_at,
-      last_attempt_at: d.last_attempt_at,
-    })),
-  }, 200);
+  return c.json(
+    {
+      id: webhook.id,
+      url: webhook.url,
+      events: JSON.parse(webhook.events),
+      status: webhook.status,
+      created_at: webhook.created_at,
+      has_secret: Boolean(webhook.secret),
+      recent_deliveries: deliveries.map((d) => ({
+        id: d.id,
+        event_type: d.event_type,
+        status: d.status,
+        attempts: d.attempts,
+        response_code: d.response_code,
+        created_at: d.created_at,
+        last_attempt_at: d.last_attempt_at,
+      })),
+    },
+    200,
+  );
 });
 
 const createWebhook = createRoute({
@@ -122,8 +137,14 @@ const createWebhook = createRoute({
     body: { content: { 'application/json': { schema: CreateWebhookBody } } },
   },
   responses: {
-    201: { content: { 'application/json': { schema: WebhookWithSecret } }, description: 'Created webhook (includes secret)' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
+    201: {
+      content: { 'application/json': { schema: WebhookWithSecret } },
+      description: 'Created webhook (includes secret)',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
   },
 });
 
@@ -140,9 +161,9 @@ app.openapi(createWebhook, async (c) => {
   }
 
   for (const event of events) {
-    if (!VALID_EVENTS.includes(event as typeof VALID_EVENTS[number])) {
+    if (!VALID_EVENTS.includes(event as (typeof VALID_EVENTS)[number])) {
       throw ApiError.invalidRequest(
-        `Invalid event type: ${event}. Valid types: ${VALID_EVENTS.join(', ')}`
+        `Invalid event type: ${event}. Valid types: ${VALID_EVENTS.join(', ')}`,
       );
     }
   }
@@ -155,17 +176,20 @@ app.openapi(createWebhook, async (c) => {
   await db.run(
     `INSERT INTO webhooks (id, url, events, secret, status, created_at)
      VALUES (?, ?, ?, ?, 'active', ?)`,
-    [id, url, JSON.stringify(events), secret, timestamp]
+    [id, url, JSON.stringify(events), secret, timestamp],
   );
 
-  return c.json({
-    id,
-    url,
-    events,
-    status: 'active' as const,
-    secret,
-    created_at: timestamp,
-  }, 201);
+  return c.json(
+    {
+      id,
+      url,
+      events,
+      status: 'active' as const,
+      secret,
+      created_at: timestamp,
+    },
+    201,
+  );
 });
 
 const updateWebhook = createRoute({
@@ -180,9 +204,18 @@ const updateWebhook = createRoute({
     body: { content: { 'application/json': { schema: UpdateWebhookBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: WebhookResponse } }, description: 'Updated webhook' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Webhook not found' },
+    200: {
+      content: { 'application/json': { schema: WebhookResponse } },
+      description: 'Updated webhook',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Webhook not found',
+    },
   },
 });
 
@@ -212,7 +245,7 @@ app.openapi(updateWebhook, async (c) => {
 
   if (events !== undefined) {
     for (const event of events) {
-      if (!VALID_EVENTS.includes(event as typeof VALID_EVENTS[number])) {
+      if (!VALID_EVENTS.includes(event as (typeof VALID_EVENTS)[number])) {
         throw ApiError.invalidRequest(`Invalid event type: ${event}`);
       }
     }
@@ -232,14 +265,17 @@ app.openapi(updateWebhook, async (c) => {
 
   const [updated] = await db.query<any>(`SELECT * FROM webhooks WHERE id = ?`, [id]);
 
-  return c.json({
-    id: updated.id,
-    url: updated.url,
-    events: JSON.parse(updated.events),
-    status: updated.status,
-    created_at: updated.created_at,
-    has_secret: true,
-  }, 200);
+  return c.json(
+    {
+      id: updated.id,
+      url: updated.url,
+      events: JSON.parse(updated.events),
+      status: updated.status,
+      created_at: updated.created_at,
+      has_secret: true,
+    },
+    200,
+  );
 });
 
 const deleteWebhook = createRoute({
@@ -251,8 +287,14 @@ const deleteWebhook = createRoute({
   middleware: [adminOnly] as const,
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: DeletedResponse } }, description: 'Webhook deleted' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Webhook not found' },
+    200: {
+      content: { 'application/json': { schema: DeletedResponse } },
+      description: 'Webhook deleted',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Webhook not found',
+    },
   },
 });
 
@@ -278,8 +320,14 @@ const rotateSecret = createRoute({
   middleware: [adminOnly] as const,
   request: { params: IdParam },
   responses: {
-    200: { content: { 'application/json': { schema: RotateSecretResponse } }, description: 'New secret' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Webhook not found' },
+    200: {
+      content: { 'application/json': { schema: RotateSecretResponse } },
+      description: 'New secret',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Webhook not found',
+    },
   },
 });
 
@@ -305,8 +353,14 @@ const getDelivery = createRoute({
   middleware: [adminOnly] as const,
   request: { params: DeliveryIdParam },
   responses: {
-    200: { content: { 'application/json': { schema: WebhookDeliveryResponse } }, description: 'Delivery details' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Webhook or delivery not found' },
+    200: {
+      content: { 'application/json': { schema: WebhookDeliveryResponse } },
+      description: 'Delivery details',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Webhook or delivery not found',
+    },
   },
 });
 
@@ -319,21 +373,24 @@ app.openapi(getDelivery, async (c) => {
 
   const [delivery] = await db.query<any>(
     `SELECT * FROM webhook_deliveries WHERE id = ? AND webhook_id = ?`,
-    [deliveryId, id]
+    [deliveryId, id],
   );
   if (!delivery) throw ApiError.notFound('Delivery not found');
 
-  return c.json({
-    id: delivery.id,
-    event_type: delivery.event_type,
-    payload: JSON.parse(delivery.payload),
-    status: delivery.status,
-    attempts: delivery.attempts,
-    response_code: delivery.response_code,
-    response_body: delivery.response_body,
-    created_at: delivery.created_at,
-    last_attempt_at: delivery.last_attempt_at,
-  }, 200);
+  return c.json(
+    {
+      id: delivery.id,
+      event_type: delivery.event_type,
+      payload: JSON.parse(delivery.payload),
+      status: delivery.status,
+      attempts: delivery.attempts,
+      response_code: delivery.response_code,
+      response_body: delivery.response_body,
+      created_at: delivery.created_at,
+      last_attempt_at: delivery.last_attempt_at,
+    },
+    200,
+  );
 });
 
 const retryDeliveryRoute = createRoute({
@@ -345,8 +402,14 @@ const retryDeliveryRoute = createRoute({
   middleware: [adminOnly] as const,
   request: { params: DeliveryIdParam },
   responses: {
-    200: { content: { 'application/json': { schema: RetryResponse } }, description: 'Retry triggered' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Webhook or delivery not found' },
+    200: {
+      content: { 'application/json': { schema: RetryResponse } },
+      description: 'Retry triggered',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Webhook or delivery not found',
+    },
   },
 });
 
@@ -359,11 +422,13 @@ app.openapi(retryDeliveryRoute, async (c) => {
 
   const [delivery] = await db.query<any>(
     `SELECT * FROM webhook_deliveries WHERE id = ? AND webhook_id = ?`,
-    [deliveryId, id]
+    [deliveryId, id],
   );
   if (!delivery) throw ApiError.notFound('Delivery not found');
 
-  await db.run(`UPDATE webhook_deliveries SET status = 'pending', attempts = 0 WHERE id = ?`, [deliveryId]);
+  await db.run(`UPDATE webhook_deliveries SET status = 'pending', attempts = 0 WHERE id = ?`, [
+    deliveryId,
+  ]);
 
   c.executionCtx.waitUntil(retryDelivery(c.var.db, webhook, delivery));
 

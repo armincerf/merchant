@@ -1,8 +1,8 @@
 import { Hono } from 'hono';
 import Stripe from 'stripe';
 import { getDb } from '../db';
-import { ApiError, uuid, now, generateOrderNumber, type HonoEnv } from '../types';
 import { dispatchWebhooks } from '../lib/webhooks';
+import { ApiError, generateOrderNumber, type HonoEnv, now, uuid } from '../types';
 import { handleUCPStripeWebhook } from './ucp';
 
 // ============================================================
@@ -49,11 +49,11 @@ webhooks.post('/stripe', async (c) => {
 
   if (event.type === 'checkout.session.completed') {
     const webhookSession = event.data.object as Stripe.Checkout.Session;
-    
+
     if (webhookSession.metadata?.ucp_checkout_session_id) {
       await handleUCPStripeWebhook(db, webhookSession.id, webhookSession);
     }
-    
+
     const cartId = webhookSession.metadata?.cart_id;
 
     if (cartId) {
@@ -91,7 +91,7 @@ webhooks.post('/stripe', async (c) => {
         // session.amount_subtotal includes discounts as negative line items, so we calculate from original items
         const subtotalCents = items.reduce(
           (sum, item) => sum + item.unit_price_cents * item.qty,
-          0
+          0,
         );
 
         // Generate order number (timestamp-based to avoid race conditions)
@@ -109,7 +109,7 @@ webhooks.post('/stripe', async (c) => {
         let customerId: string | null = null;
         const [existingCustomer] = await db.query<any>(
           `SELECT id, order_count, total_spent_cents FROM customers WHERE email = ?`,
-          [customerEmail]
+          [customerEmail],
         );
 
         if (existingCustomer) {
@@ -124,7 +124,7 @@ webhooks.post('/stripe', async (c) => {
               last_order_at = ?,
               updated_at = ?
             WHERE id = ?`,
-            [shippingName, shippingPhone, session.amount_total ?? 0, now(), now(), customerId]
+            [shippingName, shippingPhone, session.amount_total ?? 0, now(), now(), customerId],
           );
         } else {
           // Create new customer
@@ -139,7 +139,7 @@ webhooks.post('/stripe', async (c) => {
               shippingPhone,
               session.amount_total ?? 0,
               now(),
-            ]
+            ],
           );
         }
 
@@ -147,14 +147,14 @@ webhooks.post('/stripe', async (c) => {
         if (shippingAddress && customerId) {
           const [existingAddress] = await db.query<any>(
             `SELECT id FROM customer_addresses WHERE customer_id = ? AND line1 = ? AND postal_code = ?`,
-            [customerId, shippingAddress.line1, shippingAddress.postal_code]
+            [customerId, shippingAddress.line1, shippingAddress.postal_code],
           );
 
           if (!existingAddress) {
             // Check if customer has any addresses
             const [addressCount] = await db.query<any>(
               `SELECT COUNT(*) as count FROM customer_addresses WHERE customer_id = ?`,
-              [customerId]
+              [customerId],
             );
             const isDefault = addressCount.count === 0 ? 1 : 0;
 
@@ -173,7 +173,7 @@ webhooks.post('/stripe', async (c) => {
                 shippingAddress.postal_code,
                 shippingAddress.country,
                 shippingPhone,
-              ]
+              ],
             );
           }
         }
@@ -205,7 +205,7 @@ webhooks.post('/stripe', async (c) => {
             discountAmountCents,
             session.id,
             session.payment_intent,
-          ]
+          ],
         );
 
         // Track discount usage for per-customer limit tracking
@@ -215,7 +215,7 @@ webhooks.post('/stripe', async (c) => {
           // Check if already recorded (idempotency)
           const [existing] = await db.query<any>(
             `SELECT id FROM discount_usage WHERE order_id = ? AND discount_id = ?`,
-            [orderId, discountId]
+            [orderId, discountId],
           );
 
           if (!existing) {
@@ -245,7 +245,7 @@ webhooks.post('/stripe', async (c) => {
                   discountId,
                   customerEmailLower,
                   discount.usage_limit_per_customer,
-                ]
+                ],
               );
 
               // If insert failed (changes === 0), the limit was exceeded
@@ -256,7 +256,7 @@ webhooks.post('/stripe', async (c) => {
                 // but can occur with concurrent checkouts. Log for monitoring.
                 console.warn(
                   `Discount usage limit exceeded for customer ${customerEmailLower} and discount ${discountId}, ` +
-                    `but order ${orderId} already created (payment succeeded). This may indicate a race condition.`
+                    `but order ${orderId} already created (payment succeeded). This may indicate a race condition.`,
                 );
               }
             } else {
@@ -270,7 +270,7 @@ webhooks.post('/stripe', async (c) => {
                   orderId,
                   cart.customer_email.toLowerCase(),
                   discountAmountCents,
-                ]
+                ],
               );
             }
           }
@@ -281,21 +281,24 @@ webhooks.post('/stripe', async (c) => {
         for (const item of items) {
           await db.run(
             `INSERT INTO order_items (id, order_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-            [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents]
+            [uuid(), orderId, item.sku, item.title, item.qty, item.unit_price_cents],
           );
 
           await db.run(
             `UPDATE inventory SET reserved = MAX(reserved - ?, 0), on_hand = on_hand - ?, updated_at = ? WHERE sku = ?`,
-            [item.qty, item.qty, now(), item.sku]
+            [item.qty, item.qty, now(), item.sku],
           );
 
           await db.run(
             `INSERT INTO inventory_logs (id, sku, delta, reason) VALUES (?, ?, ?, 'sale')`,
-            [uuid(), item.sku, -item.qty]
+            [uuid(), item.sku, -item.qty],
           );
 
           // Broadcast inventory update after sale
-          const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [item.sku]);
+          const [inv] = await db.query<any>(
+            `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
+            [item.sku],
+          );
           const available = inv ? Math.max(0, inv.on_hand - inv.reserved) : 0;
           c.var.db.broadcast({
             type: 'inventory.updated',
@@ -351,10 +354,12 @@ webhooks.post('/stripe', async (c) => {
   }
 
   // Log event
-  await db.run(
-    `INSERT INTO events (id, stripe_event_id, type, payload) VALUES (?, ?, ?, ?)`,
-    [uuid(), event.id, event.type, JSON.stringify(event.data.object)]
-  );
+  await db.run(`INSERT INTO events (id, stripe_event_id, type, payload) VALUES (?, ?, ?, ?)`, [
+    uuid(),
+    event.id,
+    event.type,
+    JSON.stringify(event.data.object),
+  ]);
 
   return c.json({ ok: true });
 });

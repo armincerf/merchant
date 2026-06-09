@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
-import { getDb, type Database } from '../db';
-import { ApiError, uuid, now, type HonoEnv } from '../types';
+import { type Database, getDb } from '../db';
 import { hashKey } from '../middleware/auth';
+import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 // ============================================================
 // OAUTH 2.0 ROUTES
@@ -31,7 +31,7 @@ const VALID_SCOPES = [
   'addresses.write',
 ] as const;
 
-type Scope = typeof VALID_SCOPES[number];
+type Scope = (typeof VALID_SCOPES)[number];
 
 // ============================================================
 // HELPERS
@@ -56,25 +56,25 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 
 async function getOrCreateCustomer(
   db: Database,
-  email: string
+  email: string,
 ): Promise<{ id: string; email: string }> {
   const normalizedEmail = email.toLowerCase().trim();
-  
+
   let [customer] = await db.query<{ id: string; email: string }>(
     `SELECT id, email FROM customers WHERE email = ?`,
-    [normalizedEmail]
+    [normalizedEmail],
   );
-  
+
   if (!customer) {
     const customerId = uuid();
     await db.run(
       `INSERT INTO customers (id, email, created_at, updated_at)
        VALUES (?, ?, ?, ?)`,
-      [customerId, normalizedEmail, now(), now()]
+      [customerId, normalizedEmail, now(), now()],
     );
     customer = { id: customerId, email: normalizedEmail };
   }
-  
+
   return customer;
 }
 
@@ -84,7 +84,7 @@ async function getOrCreateCustomer(
 
 oauth.get('/.well-known/oauth-authorization-server', async (c) => {
   const baseUrl = new URL(c.req.url).origin;
-  
+
   return c.json({
     issuer: baseUrl,
     authorization_endpoint: `${baseUrl}/oauth/authorize`,
@@ -111,53 +111,51 @@ oauth.get('/authorize', async (c) => {
   const state = c.req.query('state');
   const codeChallenge = c.req.query('code_challenge');
   const codeChallengeMethod = c.req.query('code_challenge_method');
-  
+
   if (!clientId) throw ApiError.invalidRequest('client_id is required');
   if (!redirectUri) throw ApiError.invalidRequest('redirect_uri is required');
   if (responseType !== 'code') throw ApiError.invalidRequest('response_type must be "code"');
   if (!codeChallenge) throw ApiError.invalidRequest('code_challenge is required (PKCE)');
-  if (codeChallengeMethod !== 'S256') throw ApiError.invalidRequest('code_challenge_method must be S256');
-  
+  if (codeChallengeMethod !== 'S256')
+    throw ApiError.invalidRequest('code_challenge_method must be S256');
+
   const requestedScopes = scope.split(' ').filter(Boolean);
-  const invalidScopes = requestedScopes.filter(s => !VALID_SCOPES.includes(s as Scope));
+  const invalidScopes = requestedScopes.filter((s) => !VALID_SCOPES.includes(s as Scope));
   if (invalidScopes.length > 0) {
     throw ApiError.invalidRequest(`Invalid scopes: ${invalidScopes.join(', ')}`);
   }
-  
+
   const db = getDb(c.var.db);
   const storeName = c.env.STORE_NAME || 'Store';
-  
-  let [client] = await db.query<any>(
-    `SELECT * FROM oauth_clients WHERE client_id = ?`,
-    [clientId]
-  );
-  
+
+  let [client] = await db.query<any>(`SELECT * FROM oauth_clients WHERE client_id = ?`, [clientId]);
+
   if (!client) {
     const domain = new URL(redirectUri).hostname;
-    
+
     await db.run(
       `INSERT INTO oauth_clients (id, client_id, name, redirect_uris, created_at)
        VALUES (?, ?, ?, ?, ?)`,
-      [uuid(), clientId, domain, JSON.stringify([redirectUri]), now()]
+      [uuid(), clientId, domain, JSON.stringify([redirectUri]), now()],
     );
-    
+
     client = { client_id: clientId, redirect_uris: JSON.stringify([redirectUri]) };
   }
-  
+
   const allowedUris = JSON.parse(client.redirect_uris || '[]');
   if (!allowedUris.includes(redirectUri)) {
     throw ApiError.invalidRequest('redirect_uri not registered for this client');
   }
-  
+
   const authId = uuid();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-  
+
   await db.run(
     `INSERT INTO oauth_authorizations (id, client_id, redirect_uri, scope, state, code_challenge, expires_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [authId, clientId, redirectUri, scope, state || '', codeChallenge, expiresAt, now()]
+    [authId, clientId, redirectUri, scope, state || '', codeChallenge, expiresAt, now()],
   );
-  
+
   const html = generateLoginPage(authId, clientId, scope, storeName);
   return c.html(html);
 });
@@ -166,43 +164,45 @@ oauth.post('/authorize', async (c) => {
   const body = await c.req.parseBody();
   const authId = body['auth_id'] as string;
   const email = (body['email'] as string)?.toLowerCase().trim();
-  
+
   if (!authId || !email) {
     throw ApiError.invalidRequest('Missing auth_id or email');
   }
-  
+
   const db = getDb(c.var.db);
-  
+
   const [auth] = await db.query<any>(
     `SELECT * FROM oauth_authorizations WHERE id = ? AND status = 'pending' AND expires_at > ?`,
-    [authId, now()]
+    [authId, now()],
   );
-  
+
   if (!auth) {
     throw ApiError.invalidRequest('Authorization expired or invalid');
   }
-  
+
   const magicToken = generateSecret();
   const magicTokenHash = await hashKey(magicToken);
   const magicExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-  
+
   await db.run(
     `UPDATE oauth_authorizations SET customer_email = ?, magic_token_hash = ?, magic_expires_at = ? WHERE id = ?`,
-    [email, magicTokenHash, magicExpiresAt, authId]
+    [email, magicTokenHash, magicExpiresAt, authId],
   );
-  
+
   const baseUrl = new URL(c.req.url).origin;
   const magicLink = `${baseUrl}/oauth/verify?token=${magicToken}&auth=${authId}`;
-  
+
   // TODO: Send email via configured provider (Resend, SendGrid, etc.)
   // For now, link is shown in UI for development/testing
   console.log(`[OAuth] Magic link for ${email}: ${magicLink}`);
-  
+
   // TODO: Set showDevLink to false once a real email service is configured.
   // In production, the magic link must NEVER be rendered in HTML.
   const showDevLink = true;
   if (showDevLink) {
-    console.warn('[OAuth] WARNING: Dev magic link is being shown in HTML response. Do NOT use in production.');
+    console.warn(
+      '[OAuth] WARNING: Dev magic link is being shown in HTML response. Do NOT use in production.',
+    );
   }
   const html = generateMagicLinkSentPage(email, magicLink, showDevLink);
   return c.html(html);
@@ -211,39 +211,39 @@ oauth.post('/authorize', async (c) => {
 oauth.get('/verify', async (c) => {
   const token = c.req.query('token');
   const authId = c.req.query('auth');
-  
+
   if (!token || !authId) {
     throw ApiError.invalidRequest('Invalid verification link');
   }
-  
+
   const db = getDb(c.var.db);
   const tokenHash = await hashKey(token);
-  
+
   const [auth] = await db.query<any>(
     `SELECT * FROM oauth_authorizations 
      WHERE id = ? AND magic_token_hash = ? AND status = 'pending' AND magic_expires_at > ?`,
-    [authId, tokenHash, now()]
+    [authId, tokenHash, now()],
   );
-  
+
   if (!auth) {
     throw ApiError.invalidRequest('Link expired or already used');
   }
-  
+
   const code = generateSecret();
   const codeHash = await hashKey(code);
   const codeExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-  
+
   await db.run(
     `UPDATE oauth_authorizations SET status = 'authorized', code_hash = ?, code_expires_at = ? WHERE id = ?`,
-    [codeHash, codeExpiresAt, authId]
+    [codeHash, codeExpiresAt, authId],
   );
-  
+
   const redirectUrl = new URL(auth.redirect_uri);
   redirectUrl.searchParams.set('code', code);
   if (auth.state) {
     redirectUrl.searchParams.set('state', auth.state);
   }
-  
+
   return c.redirect(redirectUrl.toString());
 });
 
@@ -254,15 +254,15 @@ oauth.get('/verify', async (c) => {
 oauth.post('/token', async (c) => {
   const contentType = c.req.header('Content-Type');
   let body: Record<string, string>;
-  
+
   if (contentType?.includes('application/json')) {
     body = await c.req.json();
   } else {
-    body = await c.req.parseBody() as Record<string, string>;
+    body = (await c.req.parseBody()) as Record<string, string>;
   }
-  
+
   const grantType = body['grant_type'];
-  
+
   if (grantType === 'authorization_code') {
     return handleAuthorizationCodeGrant(c, body);
   } else if (grantType === 'refresh_token') {
@@ -277,48 +277,58 @@ async function handleAuthorizationCodeGrant(c: any, body: Record<string, string>
   const redirectUri = body['redirect_uri'];
   const clientId = body['client_id'];
   const codeVerifier = body['code_verifier'];
-  
+
   if (!code || !redirectUri || !clientId || !codeVerifier) {
     throw ApiError.invalidRequest('Missing required parameters');
   }
-  
+
   const db = getDb(c.var.db);
   const codeHash = await hashKey(code);
-  
+
   const [auth] = await db.query<any>(
     `SELECT * FROM oauth_authorizations 
      WHERE code_hash = ? AND client_id = ? AND redirect_uri = ? AND status = 'authorized' AND code_expires_at > ?`,
-    [codeHash, clientId, redirectUri, now()]
+    [codeHash, clientId, redirectUri, now()],
   );
-  
+
   if (!auth) {
     throw ApiError.invalidRequest('Invalid or expired authorization code');
   }
-  
+
   const expectedChallenge = await generateCodeChallenge(codeVerifier);
   if (expectedChallenge !== auth.code_challenge) {
     throw ApiError.invalidRequest('Invalid code_verifier');
   }
-  
+
   await db.run(`UPDATE oauth_authorizations SET status = 'used' WHERE id = ?`, [auth.id]);
-  
+
   const customer = await getOrCreateCustomer(db, auth.customer_email);
-  
+
   const accessToken = generateSecret();
   const refreshToken = generateSecret();
   const accessTokenHash = await hashKey(accessToken);
   const refreshTokenHash = await hashKey(refreshToken);
-  
+
   const accessExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
   const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  
+
   const tokenId = uuid();
   await db.run(
     `INSERT INTO oauth_tokens (id, client_id, customer_id, access_token_hash, refresh_token_hash, scope, access_expires_at, refresh_expires_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [tokenId, clientId, customer.id, accessTokenHash, refreshTokenHash, auth.scope, accessExpiresAt, refreshExpiresAt, now()]
+    [
+      tokenId,
+      clientId,
+      customer.id,
+      accessTokenHash,
+      refreshTokenHash,
+      auth.scope,
+      accessExpiresAt,
+      refreshExpiresAt,
+      now(),
+    ],
   );
-  
+
   return c.json({
     access_token: accessToken,
     token_type: 'Bearer',
@@ -331,32 +341,32 @@ async function handleAuthorizationCodeGrant(c: any, body: Record<string, string>
 async function handleRefreshTokenGrant(c: any, body: Record<string, string>) {
   const refreshToken = body['refresh_token'];
   const clientId = body['client_id'];
-  
+
   if (!refreshToken || !clientId) {
     throw ApiError.invalidRequest('Missing refresh_token or client_id');
   }
-  
+
   const db = getDb(c.var.db);
   const tokenHash = await hashKey(refreshToken);
-  
+
   const [token] = await db.query<any>(
     `SELECT * FROM oauth_tokens WHERE refresh_token_hash = ? AND client_id = ? AND refresh_expires_at > ?`,
-    [tokenHash, clientId, now()]
+    [tokenHash, clientId, now()],
   );
-  
+
   if (!token) {
     throw ApiError.unauthorized('Invalid or expired refresh token');
   }
-  
+
   const newAccessToken = generateSecret();
   const newAccessTokenHash = await hashKey(newAccessToken);
   const accessExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-  
+
   await db.run(
     `UPDATE oauth_tokens SET access_token_hash = ?, access_expires_at = ? WHERE id = ?`,
-    [newAccessTokenHash, accessExpiresAt, token.id]
+    [newAccessTokenHash, accessExpiresAt, token.id],
   );
-  
+
   return c.json({
     access_token: newAccessToken,
     token_type: 'Bearer',
@@ -372,19 +382,19 @@ async function handleRefreshTokenGrant(c: any, body: Record<string, string>) {
 oauth.post('/revoke', async (c) => {
   const body = await c.req.parseBody();
   const token = body['token'] as string;
-  
+
   if (!token) {
     return c.json({ revoked: true });
   }
-  
+
   const db = getDb(c.var.db);
   const tokenHash = await hashKey(token);
-  
-  await db.run(
-    `DELETE FROM oauth_tokens WHERE access_token_hash = ? OR refresh_token_hash = ?`,
-    [tokenHash, tokenHash]
-  );
-  
+
+  await db.run(`DELETE FROM oauth_tokens WHERE access_token_hash = ? OR refresh_token_hash = ?`, [
+    tokenHash,
+    tokenHash,
+  ]);
+
   return c.json({ revoked: true });
 });
 
@@ -392,23 +402,28 @@ oauth.post('/revoke', async (c) => {
 // HTML TEMPLATES
 // ============================================================
 
-function generateLoginPage(authId: string, clientId: string, scope: string, storeName: string): string {
+function generateLoginPage(
+  authId: string,
+  clientId: string,
+  scope: string,
+  storeName: string,
+): string {
   const scopeDescriptions: Record<string, string> = {
-    'openid': 'Verify your identity',
-    'profile': 'Access your name and email',
+    openid: 'Verify your identity',
+    profile: 'Access your name and email',
     'ucp:scopes:checkout_session': 'Create and manage checkout sessions',
     'ucp:scopes:order': 'Access order information and updates',
     'ucp:scopes:identity': 'Link your account',
-    'checkout': 'Create orders on your behalf',
+    checkout: 'Create orders on your behalf',
     'orders.read': 'View your order history',
     'orders.write': 'Manage your orders',
     'addresses.read': 'Access your saved addresses',
     'addresses.write': 'Manage your addresses',
   };
-  
-  const scopes = scope.split(' ').filter(s => scopeDescriptions[s]);
-  const scopeList = scopes.map(s => `<li>${scopeDescriptions[s]}</li>`).join('');
-  
+
+  const scopes = scope.split(' ').filter((s) => scopeDescriptions[s]);
+  const scopeList = scopes.map((s) => `<li>${scopeDescriptions[s]}</li>`).join('');
+
   return `<!DOCTYPE html>
 <html>
 <head>

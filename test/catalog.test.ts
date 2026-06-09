@@ -6,8 +6,8 @@
  * delete variant, delete product (with order guard), duplicate SKU rejection.
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
-import { seedStore, authedFetch, jsonBody, type SeedResult } from './helpers';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { authedFetch, jsonBody, type SeedResult, seedStore } from './helpers';
 
 let seed: SeedResult;
 
@@ -112,7 +112,7 @@ describe('variant CRUD', () => {
       {
         method: 'PATCH',
         body: JSON.stringify({ price_cents: 1500 }),
-      }
+      },
     );
     expect(res.status).toBe(200);
     const body = await jsonBody<{ price_cents: number }>(res);
@@ -131,7 +131,7 @@ describe('variant CRUD', () => {
     const delRes = await authedFetch(
       `/v1/products/${seed.productId}/variants/${tempVariantId}`,
       seed.sk,
-      { method: 'DELETE' }
+      { method: 'DELETE' },
     );
     expect(delRes.status).toBe(200);
     const body = await jsonBody<{ deleted: boolean }>(delRes);

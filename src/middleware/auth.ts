@@ -1,6 +1,6 @@
 import { createMiddleware } from 'hono/factory';
 import { getDb } from '../db';
-import { ApiError, now, type HonoEnv } from '../types';
+import { ApiError, type HonoEnv, now } from '../types';
 
 // ============================================================
 // AUTH MIDDLEWARE
@@ -27,7 +27,7 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
        JOIN customers c ON t.customer_id = c.id
        WHERE t.access_token_hash = ? AND t.access_expires_at > ?
        LIMIT 1`,
-      [tokenHash, now()]
+      [tokenHash, now()],
     );
 
     if (oauthResult.length > 0) {
@@ -46,10 +46,9 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
   }
 
   const keyHash = await hashKey(token);
-  const result = await db.query<any>(
-    `SELECT role FROM api_keys WHERE key_hash = ? LIMIT 1`,
-    [keyHash]
-  );
+  const result = await db.query<any>(`SELECT role FROM api_keys WHERE key_hash = ? LIMIT 1`, [
+    keyHash,
+  ]);
 
   if (result.length === 0) {
     throw ApiError.unauthorized('Invalid API key');
@@ -79,9 +78,7 @@ export function requireScope(...requiredScopes: string[]) {
     const auth = c.get('auth');
 
     if (auth.role === 'oauth') {
-      const hasAllScopes = requiredScopes.every(
-        (scope) => auth.oauthScopes?.includes(scope)
-      );
+      const hasAllScopes = requiredScopes.every((scope) => auth.oauthScopes?.includes(scope));
       if (!hasAllScopes) {
         throw ApiError.forbidden(`Required scopes: ${requiredScopes.join(', ')}`);
       }

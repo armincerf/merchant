@@ -3,7 +3,7 @@
  * Init script for remote/production database
  */
 
-import { execSync } from 'child_process';
+import { execSync } from 'node:child_process';
 
 async function hashKey(key: string): Promise<string> {
   const data = new TextEncoder().encode(key);
@@ -48,10 +48,10 @@ async function init() {
 
   console.log('🔑 Creating API keys...');
   runSql(
-    `INSERT INTO api_keys (id, store_id, key_hash, key_prefix, role) VALUES ('${crypto.randomUUID()}', '${storeId}', '${publicHash}', 'pk_', 'public')`
+    `INSERT INTO api_keys (id, store_id, key_hash, key_prefix, role) VALUES ('${crypto.randomUUID()}', '${storeId}', '${publicHash}', 'pk_', 'public')`,
   );
   runSql(
-    `INSERT INTO api_keys (id, store_id, key_hash, key_prefix, role) VALUES ('${crypto.randomUUID()}', '${storeId}', '${adminHash}', 'sk_', 'admin')`
+    `INSERT INTO api_keys (id, store_id, key_hash, key_prefix, role) VALUES ('${crypto.randomUUID()}', '${storeId}', '${adminHash}', 'sk_', 'admin')`,
   );
 
   console.log('\n✅ Store created!\n');
@@ -59,14 +59,14 @@ async function init() {
   console.log('\n🔑 API Keys (save these, shown only once!):\n');
   console.log(`   Public:  ${publicKey}`);
   console.log(`   Admin:   ${adminKey}`);
-  console.log('\n' + '─'.repeat(50));
+  console.log(`\n${'─'.repeat(50)}`);
   console.log('\n📝 Next steps:\n');
   console.log('   1. Connect Stripe:');
   console.log(`      curl -X POST https://YOUR_WORKER_URL/v1/setup/stripe \\`);
   console.log(`        -H "Authorization: Bearer ${adminKey}" \\`);
   console.log(`        -H "Content-Type: application/json" \\`);
   console.log(
-    `        -d '{"stripe_secret_key":"sk_live_...","stripe_webhook_secret":"whsec_..."}'\n`
+    `        -d '{"stripe_secret_key":"sk_live_...","stripe_webhook_secret":"whsec_..."}'\n`,
   );
   console.log('   2. Start admin dashboard:');
   console.log('      cd admin && npm run dev\n');

@@ -1,28 +1,29 @@
-import { OpenAPIHono, createRoute } from '@hono/zod-openapi';
-import { z } from '@hono/zod-openapi';
+import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import Stripe from 'stripe';
 import { getDb } from '../db';
 import { authMiddleware } from '../middleware/auth';
-import { ApiError, uuid, now, isValidEmail, type HonoEnv } from '../types';
-import { validateDiscount, calculateDiscount, type Discount } from './discounts';
 import {
-  CartIdParam,
-  CartResponse,
-  CreateCartBody,
-  AddCartItemsBody,
   AddCartItemBody,
-  CheckoutBody,
-  CheckoutResponse,
+  AddCartItemsBody,
   ApplyDiscountBody,
   ApplyDiscountResponse,
-  ErrorResponse,
+  CartIdParam,
+  CartResponse,
   CartTotals,
+  CheckoutBody,
+  CheckoutResponse,
+  CreateCartBody,
+  ErrorResponse,
 } from '../schemas';
+import { ApiError, type HonoEnv, isValidEmail, now, uuid } from '../types';
+import { calculateDiscount, type Discount, validateDiscount } from './discounts';
 
-const RemoveDiscountResponse = z.object({
-  discount: z.null(),
-  totals: CartTotals,
-}).openapi('RemoveDiscountResponse');
+const RemoveDiscountResponse = z
+  .object({
+    discount: z.null(),
+    totals: CartTotals,
+  })
+  .openapi('RemoveDiscountResponse');
 
 const app = new OpenAPIHono<HonoEnv>();
 
@@ -36,7 +37,10 @@ const getCart = createRoute({
   request: { params: CartIdParam },
   responses: {
     200: { content: { 'application/json': { schema: CartResponse } }, description: 'Cart details' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart not found' },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart not found',
+    },
   },
 });
 
@@ -49,20 +53,23 @@ app.openapi(getCart, async (c) => {
 
   const items = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
 
-  return c.json({
-    id: cart.id,
-    status: cart.status,
-    currency: cart.currency,
-    customer_email: cart.customer_email,
-    items: items.map((i) => ({
-      sku: i.sku,
-      title: i.title,
-      qty: i.qty,
-      unit_price_cents: i.unit_price_cents,
-    })),
-    expires_at: cart.expires_at,
-    stripe_checkout_session_id: cart.stripe_checkout_session_id,
-  }, 200);
+  return c.json(
+    {
+      id: cart.id,
+      status: cart.status,
+      currency: cart.currency,
+      customer_email: cart.customer_email,
+      items: items.map((i) => ({
+        sku: i.sku,
+        title: i.title,
+        qty: i.qty,
+        unit_price_cents: i.unit_price_cents,
+      })),
+      expires_at: cart.expires_at,
+      stripe_checkout_session_id: cart.stripe_checkout_session_id,
+    },
+    200,
+  );
 });
 
 const createCart = createRoute({
@@ -73,7 +80,10 @@ const createCart = createRoute({
   request: { body: { content: { 'application/json': { schema: CreateCartBody } } } },
   responses: {
     200: { content: { 'application/json': { schema: CartResponse } }, description: 'Created cart' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid email' },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid email',
+    },
   },
 });
 
@@ -94,22 +104,25 @@ app.openapi(createCart, async (c) => {
     expiresAt,
   ]);
 
-  return c.json({
-    id,
-    status: 'open' as const,
-    currency: 'USD',
-    customer_email,
-    items: [],
-    discount: null,
-    totals: {
-      subtotal_cents: 0,
-      discount_cents: 0,
-      shipping_cents: 0,
-      tax_cents: 0,
-      total_cents: 0,
+  return c.json(
+    {
+      id,
+      status: 'open' as const,
+      currency: 'USD',
+      customer_email,
+      items: [],
+      discount: null,
+      totals: {
+        subtotal_cents: 0,
+        discount_cents: 0,
+        shipping_cents: 0,
+        tax_cents: 0,
+        total_cents: 0,
+      },
+      expires_at: expiresAt,
     },
-    expires_at: expiresAt,
-  }, 200);
+    200,
+  );
 });
 
 const addCartItems = createRoute({
@@ -124,9 +137,18 @@ const addCartItems = createRoute({
   },
   responses: {
     200: { content: { 'application/json': { schema: CartResponse } }, description: 'Updated cart' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart or SKU not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart is not open' },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart or SKU not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart is not open',
+    },
   },
 });
 
@@ -155,11 +177,13 @@ app.openapi(addCartItems, async (c) => {
   }
 
   // Release inventory reservations for existing cart items before replacing
-  const oldCartItems = await db.query<any>(`SELECT sku, qty FROM cart_items WHERE cart_id = ?`, [cartId]);
+  const oldCartItems = await db.query<any>(`SELECT sku, qty FROM cart_items WHERE cart_id = ?`, [
+    cartId,
+  ]);
   for (const oldItem of oldCartItems) {
     await db.run(
       `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
-      [oldItem.qty, now(), oldItem.sku]
+      [oldItem.qty, now(), oldItem.sku],
     );
   }
 
@@ -169,16 +193,19 @@ app.openapi(addCartItems, async (c) => {
   for (const item of validatedItems) {
     const result = await db.run(
       `UPDATE inventory SET reserved = reserved + ?, updated_at = ? WHERE sku = ? AND on_hand - reserved >= ?`,
-      [item.qty, now(), item.sku, item.qty]
+      [item.qty, now(), item.sku, item.qty],
     );
     if (result.changes === 0) {
       // Reservation failed — release any reservations made so far in this loop
       // by querying what we've already inserted into cart_items
-      const insertedItems = await db.query<any>(`SELECT sku, qty FROM cart_items WHERE cart_id = ?`, [cartId]);
+      const insertedItems = await db.query<any>(
+        `SELECT sku, qty FROM cart_items WHERE cart_id = ?`,
+        [cartId],
+      );
       for (const inserted of insertedItems) {
         await db.run(
           `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
-          [inserted.qty, now(), inserted.sku]
+          [inserted.qty, now(), inserted.sku],
         );
       }
       await db.run(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
@@ -187,7 +214,7 @@ app.openapi(addCartItems, async (c) => {
 
     await db.run(
       `INSERT INTO cart_items (id, cart_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuid(), cartId, item.sku, item.title, item.qty, item.unit_price_cents]
+      [uuid(), cartId, item.sku, item.title, item.qty, item.unit_price_cents],
     );
   }
 
@@ -197,7 +224,9 @@ app.openapi(addCartItems, async (c) => {
   validatedItems.forEach((i) => affectedSkuSet.add(i.sku));
   const affectedSkus = Array.from(affectedSkuSet);
   for (const sku of affectedSkus) {
-    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [sku]);
+    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [
+      sku,
+    ]);
     const available = inv ? inv.on_hand - inv.reserved : 0;
     c.var.db.broadcast({
       type: 'inventory.updated',
@@ -209,7 +238,7 @@ app.openapi(addCartItems, async (c) => {
   const allCartItems = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
   const subtotalCents = allCartItems.reduce(
     (sum, item) => sum + item.unit_price_cents * item.qty,
-    0
+    0,
   );
 
   let discountInfo = null;
@@ -234,38 +263,41 @@ app.openapi(addCartItems, async (c) => {
       } catch {
         await db.run(
           `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-          [cartId]
+          [cartId],
         );
       }
     } else {
       await db.run(
         `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-        [cartId]
+        [cartId],
       );
     }
   }
 
-  return c.json({
-    id: cart.id,
-    status: cart.status,
-    currency: cart.currency,
-    customer_email: cart.customer_email,
-    items: allCartItems.map((item) => ({
-      sku: item.sku,
-      title: item.title,
-      qty: item.qty,
-      unit_price_cents: item.unit_price_cents,
-    })),
-    discount: discountInfo,
-    totals: {
-      subtotal_cents: subtotalCents,
-      discount_cents: discountAmountCents,
-      shipping_cents: 0,
-      tax_cents: 0,
-      total_cents: subtotalCents - discountAmountCents,
+  return c.json(
+    {
+      id: cart.id,
+      status: cart.status,
+      currency: cart.currency,
+      customer_email: cart.customer_email,
+      items: allCartItems.map((item) => ({
+        sku: item.sku,
+        title: item.title,
+        qty: item.qty,
+        unit_price_cents: item.unit_price_cents,
+      })),
+      discount: discountInfo,
+      totals: {
+        subtotal_cents: subtotalCents,
+        discount_cents: discountAmountCents,
+        shipping_cents: 0,
+        tax_cents: 0,
+        total_cents: subtotalCents - discountAmountCents,
+      },
+      expires_at: cart.expires_at,
     },
-    expires_at: cart.expires_at,
-  }, 200);
+    200,
+  );
 });
 
 // === Incremental add/remove with atomic reservation ===
@@ -275,16 +307,26 @@ const addCartItem = createRoute({
   path: '/{cartId}/items/add',
   tags: ['Checkout'],
   summary: 'Add or remove a single item with atomic inventory reservation',
-  description: 'Positive qty adds items (reserves inventory). Negative qty removes items (releases reservation).',
+  description:
+    'Positive qty adds items (reserves inventory). Negative qty removes items (releases reservation).',
   request: {
     params: CartIdParam,
     body: { content: { 'application/json': { schema: AddCartItemBody } } },
   },
   responses: {
     200: { content: { 'application/json': { schema: CartResponse } }, description: 'Updated cart' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart or SKU not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Insufficient inventory or cart not open' },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart or SKU not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Insufficient inventory or cart not open',
+    },
   },
 });
 
@@ -309,7 +351,7 @@ app.openapi(addCartItem, async (c) => {
   // Get current cart item for this SKU
   const [existingItem] = await db.query<any>(
     `SELECT * FROM cart_items WHERE cart_id = ? AND sku = ?`,
-    [cartId, sku]
+    [cartId, sku],
   );
   const currentQty = existingItem?.qty ?? 0;
 
@@ -317,7 +359,7 @@ app.openapi(addCartItem, async (c) => {
     // ADDING: reserve inventory atomically
     const result = await db.run(
       `UPDATE inventory SET reserved = reserved + ?, updated_at = ? WHERE sku = ? AND on_hand - reserved >= ?`,
-      [qty, now(), sku, qty]
+      [qty, now(), sku, qty],
     );
     if (result.changes === 0) {
       throw ApiError.insufficientInventory(sku);
@@ -325,14 +367,15 @@ app.openapi(addCartItem, async (c) => {
 
     // Upsert cart item
     if (existingItem) {
-      await db.run(
-        `UPDATE cart_items SET qty = qty + ? WHERE cart_id = ? AND sku = ?`,
-        [qty, cartId, sku]
-      );
+      await db.run(`UPDATE cart_items SET qty = qty + ? WHERE cart_id = ? AND sku = ?`, [
+        qty,
+        cartId,
+        sku,
+      ]);
     } else {
       await db.run(
         `INSERT INTO cart_items (id, cart_id, sku, title, qty, unit_price_cents) VALUES (?, ?, ?, ?, ?, ?)`,
-        [uuid(), cartId, sku, variant.title, qty, variant.price_cents]
+        [uuid(), cartId, sku, variant.title, qty, variant.price_cents],
       );
     }
   } else {
@@ -343,24 +386,29 @@ app.openapi(addCartItem, async (c) => {
     } else {
       await db.run(
         `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
-        [release, now(), sku]
+        [release, now(), sku],
       );
 
       const newQty = currentQty - release;
       if (newQty <= 0) {
         await db.run(`DELETE FROM cart_items WHERE cart_id = ? AND sku = ?`, [cartId, sku]);
       } else {
-        await db.run(
-          `UPDATE cart_items SET qty = ? WHERE cart_id = ? AND sku = ?`,
-          [newQty, cartId, sku]
-        );
+        await db.run(`UPDATE cart_items SET qty = ? WHERE cart_id = ? AND sku = ?`, [
+          newQty,
+          cartId,
+          sku,
+        ]);
       }
     }
   }
 
   // Reset expires_at to 30 min from now
   const newExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-  await db.run(`UPDATE carts SET expires_at = ?, updated_at = ? WHERE id = ?`, [newExpiresAt, now(), cartId]);
+  await db.run(`UPDATE carts SET expires_at = ?, updated_at = ? WHERE id = ?`, [
+    newExpiresAt,
+    now(),
+    cartId,
+  ]);
 
   // Broadcast inventory update
   const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [sku]);
@@ -375,19 +423,24 @@ app.openapi(addCartItem, async (c) => {
   const allCartItems = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
   const subtotalCents = allCartItems.reduce(
     (sum, item) => sum + item.unit_price_cents * item.qty,
-    0
+    0,
   );
 
   // Recompute discount if present
   let discountInfo = null;
   let discountAmountCents = 0;
   if (cart.discount_id) {
-    const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [cart.discount_id]);
+    const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [
+      cart.discount_id,
+    ]);
     if (discount) {
       try {
         await validateDiscount(db, discount as Discount, subtotalCents, cart.customer_email);
         discountAmountCents = calculateDiscount(discount as Discount, subtotalCents);
-        await db.run(`UPDATE carts SET discount_amount_cents = ? WHERE id = ?`, [discountAmountCents, cartId]);
+        await db.run(`UPDATE carts SET discount_amount_cents = ? WHERE id = ?`, [
+          discountAmountCents,
+          cartId,
+        ]);
         discountInfo = {
           code: discount.code,
           type: discount.type as 'percentage' | 'fixed_amount',
@@ -396,33 +449,36 @@ app.openapi(addCartItem, async (c) => {
       } catch {
         await db.run(
           `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-          [cartId]
+          [cartId],
         );
       }
     }
   }
 
-  return c.json({
-    id: cart.id,
-    status: cart.status,
-    currency: cart.currency,
-    customer_email: cart.customer_email,
-    items: allCartItems.map((item) => ({
-      sku: item.sku,
-      title: item.title,
-      qty: item.qty,
-      unit_price_cents: item.unit_price_cents,
-    })),
-    discount: discountInfo,
-    totals: {
-      subtotal_cents: subtotalCents,
-      discount_cents: discountAmountCents,
-      shipping_cents: 0,
-      tax_cents: 0,
-      total_cents: subtotalCents - discountAmountCents,
+  return c.json(
+    {
+      id: cart.id,
+      status: cart.status,
+      currency: cart.currency,
+      customer_email: cart.customer_email,
+      items: allCartItems.map((item) => ({
+        sku: item.sku,
+        title: item.title,
+        qty: item.qty,
+        unit_price_cents: item.unit_price_cents,
+      })),
+      discount: discountInfo,
+      totals: {
+        subtotal_cents: subtotalCents,
+        discount_cents: discountAmountCents,
+        shipping_cents: 0,
+        tax_cents: 0,
+        total_cents: subtotalCents - discountAmountCents,
+      },
+      expires_at: newExpiresAt,
     },
-    expires_at: newExpiresAt,
-  }, 200);
+    200,
+  );
 });
 
 const checkoutCart = createRoute({
@@ -436,16 +492,29 @@ const checkoutCart = createRoute({
     body: { content: { 'application/json': { schema: CheckoutBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: CheckoutResponse } }, description: 'Checkout URL' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid request or insufficient inventory' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart is not open' },
+    200: {
+      content: { 'application/json': { schema: CheckoutResponse } },
+      description: 'Checkout URL',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid request or insufficient inventory',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart is not open',
+    },
   },
 });
 
 app.openapi(checkoutCart, async (c) => {
   const { cartId } = c.req.valid('param');
-  const { success_url, cancel_url, collect_shipping, shipping_countries, shipping_options } = c.req.valid('json');
+  const { success_url, cancel_url, collect_shipping, shipping_countries, shipping_options } =
+    c.req.valid('json');
 
   const stripeSecretKey = c.get('auth').stripeSecretKey;
   if (!stripeSecretKey) {
@@ -456,7 +525,7 @@ app.openapi(checkoutCart, async (c) => {
 
   const statusUpdateResult = await db.run(
     `UPDATE carts SET status = 'checked_out', updated_at = ? WHERE id = ? AND status = 'open'`,
-    [now(), cartId]
+    [now(), cartId],
   );
 
   if (statusUpdateResult.changes === 0) {
@@ -497,7 +566,7 @@ app.openapi(checkoutCart, async (c) => {
       } catch (err) {
         await db.run(
           `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-          [cartId]
+          [cartId],
         );
         await revertCartStatus();
         if (err instanceof ApiError) throw err;
@@ -514,12 +583,12 @@ app.openapi(checkoutCart, async (c) => {
       if (discount.usage_limit_per_customer !== null) {
         const [usage] = await db.query<any>(
           `SELECT COUNT(*) as count FROM discount_usage WHERE discount_id = ? AND customer_email = ?`,
-          [discount.id, cart.customer_email.toLowerCase()]
+          [discount.id, cart.customer_email.toLowerCase()],
         );
         if (usage && usage.count >= discount.usage_limit_per_customer) {
           await db.run(
             `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-            [cartId]
+            [cartId],
           );
           await revertCartStatus();
           throw ApiError.invalidRequest('You have already used this discount');
@@ -535,13 +604,13 @@ app.openapi(checkoutCart, async (c) => {
              AND (starts_at IS NULL OR starts_at <= ?)
              AND (expires_at IS NULL OR expires_at >= ?)
              AND usage_count < usage_limit`,
-          [currentTime, discount.id, currentTime, currentTime]
+          [currentTime, discount.id, currentTime, currentTime],
         );
 
         if (result.changes === 0) {
           await db.run(
             `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-            [cartId]
+            [cartId],
           );
           await revertCartStatus();
           throw ApiError.invalidRequest('Discount usage limit reached');
@@ -555,13 +624,13 @@ app.openapi(checkoutCart, async (c) => {
              AND status = 'active'
              AND (starts_at IS NULL OR starts_at <= ?)
              AND (expires_at IS NULL OR expires_at >= ?)`,
-          [currentTime, discount.id, currentTime, currentTime]
+          [currentTime, discount.id, currentTime, currentTime],
         );
 
         if (result.changes === 0) {
           await db.run(
             `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-            [cartId]
+            [cartId],
           );
           await revertCartStatus();
           throw ApiError.invalidRequest('Discount is no longer valid');
@@ -572,7 +641,7 @@ app.openapi(checkoutCart, async (c) => {
     } else {
       await db.run(
         `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-        [cartId]
+        [cartId],
       );
     }
   }
@@ -581,7 +650,7 @@ app.openapi(checkoutCart, async (c) => {
     if (discountReserved && discount) {
       await db.run(
         `UPDATE discounts SET usage_count = MAX(usage_count - 1, 0), updated_at = ? WHERE id = ?`,
-        [now(), discount.id]
+        [now(), discount.id],
       );
     }
   };
@@ -589,7 +658,9 @@ app.openapi(checkoutCart, async (c) => {
   // Inventory is already reserved at add-to-cart time.
   // Verify reservations are still valid (items exist and inventory is sufficient).
   for (const item of items) {
-    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [item.sku]);
+    const [inv] = await db.query<any>(`SELECT on_hand, reserved FROM inventory WHERE sku = ?`, [
+      item.sku,
+    ]);
     if (!inv || inv.on_hand < item.qty) {
       await releaseReservedDiscount();
       await revertCartStatus();
@@ -638,7 +709,7 @@ app.openapi(checkoutCart, async (c) => {
         await revertCartStatus();
         console.error(`Failed to create Stripe coupon for discount: ${err.message}`);
         throw ApiError.invalidRequest(
-          'Failed to apply discount. Please try again or remove the discount and proceed.'
+          'Failed to apply discount. Please try again or remove the discount and proceed.',
         );
       }
     }
@@ -694,13 +765,16 @@ app.openapi(checkoutCart, async (c) => {
   const checkoutExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
   await db.run(
     `UPDATE carts SET stripe_checkout_session_id = ?, discount_amount_cents = ?, expires_at = ?, updated_at = ? WHERE id = ?`,
-    [session.id, discountAmountCents, checkoutExpiresAt, now(), cartId]
+    [session.id, discountAmountCents, checkoutExpiresAt, now(), cartId],
   );
 
-  return c.json({
-    checkout_url: session.url!,
-    stripe_checkout_session_id: session.id,
-  }, 200);
+  return c.json(
+    {
+      checkout_url: session.url!,
+      stripe_checkout_session_id: session.id,
+    },
+    200,
+  );
 });
 
 const applyDiscount = createRoute({
@@ -713,10 +787,22 @@ const applyDiscount = createRoute({
     body: { content: { 'application/json': { schema: ApplyDiscountBody } } },
   },
   responses: {
-    200: { content: { 'application/json': { schema: ApplyDiscountResponse } }, description: 'Discount applied' },
-    400: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Invalid discount' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart or discount not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart is not open' },
+    200: {
+      content: { 'application/json': { schema: ApplyDiscountResponse } },
+      description: 'Discount applied',
+    },
+    400: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Invalid discount',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart or discount not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart is not open',
+    },
   },
 });
 
@@ -731,7 +817,9 @@ app.openapi(applyDiscount, async (c) => {
 
   const normalizedCode = code.toUpperCase().trim();
 
-  const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE code = ?`, [normalizedCode]);
+  const [discount] = await db.query<any>(`SELECT * FROM discounts WHERE code = ?`, [
+    normalizedCode,
+  ]);
   if (!discount) throw ApiError.notFound('Discount code not found');
 
   const items = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
@@ -746,23 +834,26 @@ app.openapi(applyDiscount, async (c) => {
 
   await db.run(
     `UPDATE carts SET discount_code = ?, discount_id = ?, discount_amount_cents = ? WHERE id = ?`,
-    [discount.code, discount.id, discountAmountCents, cartId]
+    [discount.code, discount.id, discountAmountCents, cartId],
   );
 
-  return c.json({
-    discount: {
-      code: discount.code,
-      type: discount.type as 'percentage' | 'fixed_amount',
-      amount_cents: discountAmountCents,
+  return c.json(
+    {
+      discount: {
+        code: discount.code,
+        type: discount.type as 'percentage' | 'fixed_amount',
+        amount_cents: discountAmountCents,
+      },
+      totals: {
+        subtotal_cents: subtotalCents,
+        discount_cents: discountAmountCents,
+        shipping_cents: 0,
+        tax_cents: 0,
+        total_cents: subtotalCents - discountAmountCents,
+      },
     },
-    totals: {
-      subtotal_cents: subtotalCents,
-      discount_cents: discountAmountCents,
-      shipping_cents: 0,
-      tax_cents: 0,
-      total_cents: subtotalCents - discountAmountCents,
-    },
-  }, 200);
+    200,
+  );
 });
 
 const removeDiscount = createRoute({
@@ -772,9 +863,18 @@ const removeDiscount = createRoute({
   summary: 'Remove discount from cart',
   request: { params: CartIdParam },
   responses: {
-    200: { content: { 'application/json': { schema: RemoveDiscountResponse } }, description: 'Discount removed' },
-    404: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart not found' },
-    409: { content: { 'application/json': { schema: ErrorResponse } }, description: 'Cart is not open' },
+    200: {
+      content: { 'application/json': { schema: RemoveDiscountResponse } },
+      description: 'Discount removed',
+    },
+    404: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart not found',
+    },
+    409: {
+      content: { 'application/json': { schema: ErrorResponse } },
+      description: 'Cart is not open',
+    },
   },
 });
 
@@ -788,7 +888,7 @@ app.openapi(removeDiscount, async (c) => {
 
   await db.run(
     `UPDATE carts SET discount_code = NULL, discount_id = NULL, discount_amount_cents = 0 WHERE id = ?`,
-    [cartId]
+    [cartId],
   );
 
   const items = await db.query<any>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
@@ -796,16 +896,19 @@ app.openapi(removeDiscount, async (c) => {
     return sum + item.unit_price_cents * item.qty;
   }, 0);
 
-  return c.json({
-    discount: null,
-    totals: {
-      subtotal_cents: subtotalCents,
-      discount_cents: 0,
-      shipping_cents: 0,
-      tax_cents: 0,
-      total_cents: subtotalCents,
+  return c.json(
+    {
+      discount: null,
+      totals: {
+        subtotal_cents: subtotalCents,
+        discount_cents: 0,
+        shipping_cents: 0,
+        tax_cents: 0,
+        total_cents: subtotalCents,
+      },
     },
-  }, 200);
+    200,
+  );
 });
 
 export { app as checkout };
