@@ -18,6 +18,23 @@ import { ApiError, type HonoEnv, now, uuid } from '../types';
 
 export const oauth = new Hono<HonoEnv>();
 
+// ============================================================
+// HTML ESCAPING
+// ============================================================
+
+/**
+ * Escapes a string for safe interpolation into HTML text content
+ * and attribute values (escapes &, <, >, ", ').
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 const VALID_SCOPES = [
   'openid',
   'profile',
@@ -193,17 +210,16 @@ oauth.post('/authorize', async (c) => {
   const magicLink = `${baseUrl}/oauth/verify?token=${magicToken}&auth=${authId}`;
 
   // TODO: Send email via configured provider (Resend, SendGrid, etc.)
-  // For now, link is shown in UI for development/testing
-  console.log(`[OAuth] Magic link for ${email}: ${magicLink}`);
-
-  // TODO: Set showDevLink to false once a real email service is configured.
-  // In production, the magic link must NEVER be rendered in HTML.
-  const showDevLink = true;
+  // For now, link is only shown in UI when OAUTH_DEV_LINKS=true (local dev).
+  const showDevLink = c.env.OAUTH_DEV_LINKS === 'true';
   if (showDevLink) {
     console.warn(
       '[OAuth] WARNING: Dev magic link is being shown in HTML response. Do NOT use in production.',
     );
   }
+  // Always log to server-side console for debugging (not visible to clients).
+  console.log(`[OAuth] Magic link for ${email}: ${magicLink}`);
+
   const html = generateMagicLinkSentPage(email, magicLink, showDevLink);
   return c.html(html);
 });
@@ -424,12 +440,16 @@ function generateLoginPage(
   const scopes = scope.split(' ').filter((s) => scopeDescriptions[s]);
   const scopeList = scopes.map((s) => `<li>${scopeDescriptions[s]}</li>`).join('');
 
+  const safeStoreName = escapeHtml(storeName);
+  const safeClientId = escapeHtml(clientId);
+  const safeAuthId = escapeHtml(authId);
+
   return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign In - ${storeName}</title>
+  <title>Sign In - ${safeStoreName}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -451,33 +471,37 @@ function generateLoginPage(
 </head>
 <body>
   <div class="card">
-    <h1>Sign in to ${storeName}</h1>
-    <p class="subtitle"><strong>${clientId}</strong> wants to access your account</p>
-    
+    <h1>Sign in to ${safeStoreName}</h1>
+    <p class="subtitle"><strong>${safeClientId}</strong> wants to access your account</p>
+
     <div class="permissions">
       <h3>This will allow them to:</h3>
       <ul>${scopeList}</ul>
     </div>
-    
+
     <form method="POST" action="/oauth/authorize">
-      <input type="hidden" name="auth_id" value="${authId}">
+      <input type="hidden" name="auth_id" value="${safeAuthId}">
       <label for="email">Email address</label>
       <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
       <button type="submit">Continue with Email</button>
     </form>
-    
+
     <p class="footer">We'll send you a link to verify your email</p>
   </div>
 </body>
 </html>`;
 }
 
-function generateMagicLinkSentPage(email: string, magicLink: string, showDevLink = true): string {
+function generateMagicLinkSentPage(email: string, magicLink: string, showDevLink = false): string {
+  const safeEmail = escapeHtml(email);
+  // magicLink is server-generated, but we still escape quotes for attribute safety.
+  const safeMagicLink = escapeHtml(magicLink);
+
   const devLinkHtml = showDevLink
     ? `
     <div class="dev-link">
-      <p class="dev-label">⚠️ DEV MODE - No email service configured</p>
-      <a href="${magicLink}">Click here to verify (dev only)</a>
+      <p class="dev-label">&#9888;&#65039; DEV MODE - No email service configured</p>
+      <a href="${safeMagicLink}">Click here to verify (dev only)</a>
     </div>`
     : '';
 
@@ -502,9 +526,9 @@ function generateMagicLinkSentPage(email: string, magicLink: string, showDevLink
 </head>
 <body>
   <div class="card">
-    <div class="icon">✉️</div>
+    <div class="icon">&#x2709;&#xFE0F;</div>
     <h1>Check Your Email</h1>
-    <p class="subtitle">We sent a verification link to<br><span class="email">${email}</span></p>
+    <p class="subtitle">We sent a verification link to<br><span class="email">${safeEmail}</span></p>
     <p style="color: #666; font-size: 14px;">Click the link in the email to continue</p>
     ${devLinkHtml}
   </div>

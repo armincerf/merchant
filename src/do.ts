@@ -9,6 +9,8 @@ export interface MerchantEnv {
   STORE_NAME?: string;
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  /** Set to "true" to render the magic link in the OAuth HTML response (local dev only). */
+  OAUTH_DEV_LINKS?: string;
 }
 
 export type WSEventType =

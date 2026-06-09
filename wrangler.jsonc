@@ -27,7 +27,12 @@
   ],
 
   "vars": {
-    "IMAGES_URL": ""
+    "IMAGES_URL": "",
+    // Set OAUTH_DEV_LINKS="true" for local dev to render the magic link in the
+    // OAuth HTML response (useful when no email service is configured).
+    // NEVER set this in production — it would expose sign-in links to anyone
+    // who submits the authorization form.
+    "OAUTH_DEV_LINKS": ""
   },
 
   "triggers": {
