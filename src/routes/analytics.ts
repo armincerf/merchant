@@ -254,31 +254,29 @@ async function queryPeriodMetrics(
   start: string,
   end: string,
 ): Promise<{ visitors: number; page_views: number; orders: number; revenue_cents: number }> {
-  const [visitors] = await db.query<{ count: number }>(
-    `SELECT COUNT(DISTINCT session_id) as count FROM analytics_events WHERE created_at >= ? AND created_at < ?`,
-    [start, end],
-  );
-
-  const [pageViews] = await db.query<{ count: number }>(
-    `SELECT COUNT(*) as count FROM analytics_events WHERE event_type = 'page_view' AND created_at >= ? AND created_at < ?`,
-    [start, end],
-  );
-
-  const [orders] = await db.query<{ count: number }>(
-    `SELECT COUNT(*) as count FROM analytics_events WHERE event_type = 'order_completed' AND created_at >= ? AND created_at < ?`,
-    [start, end],
-  );
-
-  const [revenue] = await db.query<{ total: number | null }>(
-    `SELECT COALESCE(SUM(json_extract(event_data, '$.order_total_cents')), 0) as total FROM analytics_events WHERE event_type = 'order_completed' AND created_at >= ? AND created_at < ?`,
+  // Single consolidated query using conditional aggregation — avoids 4 round-trips.
+  const [row] = await db.query<{
+    visitors: number;
+    page_views: number;
+    orders: number;
+    revenue_cents: number | null;
+  }>(
+    `SELECT
+       COUNT(DISTINCT session_id) AS visitors,
+       SUM(CASE WHEN event_type = 'page_view' THEN 1 ELSE 0 END) AS page_views,
+       SUM(CASE WHEN event_type = 'order_completed' THEN 1 ELSE 0 END) AS orders,
+       COALESCE(SUM(CASE WHEN event_type = 'order_completed'
+         THEN json_extract(event_data, '$.order_total_cents') ELSE 0 END), 0) AS revenue_cents
+     FROM analytics_events
+     WHERE created_at >= ? AND created_at < ?`,
     [start, end],
   );
 
   return {
-    visitors: visitors?.count ?? 0,
-    page_views: pageViews?.count ?? 0,
-    orders: orders?.count ?? 0,
-    revenue_cents: revenue?.total ?? 0,
+    visitors: row?.visitors ?? 0,
+    page_views: row?.page_views ?? 0,
+    orders: row?.orders ?? 0,
+    revenue_cents: row?.revenue_cents ?? 0,
   };
 }
 
@@ -531,9 +529,21 @@ app.openapi(getFunnel, async (c) => {
   const days = periodToDays(period);
   const { start, end } = dateRangeISO(days, 0);
 
-  // For a true funnel, each step only counts sessions that also appeared in all
-  // previous steps. We build up a running intersection of session sets.
-  let previousSessions: Set<string> | null = null;
+  // Cumulative funnel: each step N counts only sessions that have event N AND
+  // all prior events in the period. Implemented as progressive SQL INTERSECTs so
+  // only COUNT values cross the wire — no session_id sets loaded into JS memory.
+  //
+  // For step k we build:
+  //   SELECT COUNT(*) FROM (
+  //     SELECT DISTINCT session_id FROM analytics_events WHERE event_type = 'step_0' AND ...
+  //     INTERSECT
+  //     SELECT DISTINCT session_id FROM analytics_events WHERE event_type = 'step_1' AND ...
+  //     INTERSECT ...
+  //     INTERSECT
+  //     SELECT DISTINCT session_id FROM analytics_events WHERE event_type = 'step_k' AND ...
+  //   )
+  //
+  // Event types come from the FUNNEL_STEPS constant — no user input is interpolated.
 
   const steps: Array<{
     name: string;
@@ -542,46 +552,36 @@ app.openapi(getFunnel, async (c) => {
     drop_off_pct: number;
   }> = [];
 
-  for (const step of FUNNEL_STEPS) {
-    // Get distinct sessions for this event type in the period
-    const rows = await db.query<{ session_id: string }>(
-      `SELECT DISTINCT session_id FROM analytics_events WHERE event_type = ? AND created_at >= ? AND created_at < ?`,
-      [step.event_type, start, end],
-    );
+  for (let k = 0; k < FUNNEL_STEPS.length; k++) {
+    // Build INTERSECT chain for steps 0..k
+    const selectParts: string[] = [];
+    const params: unknown[] = [];
 
-    const currentSessions = new Set(rows.map((r) => r.session_id));
-
-    // Intersect with previous step's sessions (true funnel)
-    let funnelSessions: Set<string>;
-    if (previousSessions === null) {
-      // First step: no intersection needed
-      funnelSessions = currentSessions;
-    } else {
-      // Only keep sessions that were in the previous step AND this step
-      funnelSessions = new Set<string>();
-      for (const sid of currentSessions) {
-        if (previousSessions.has(sid)) {
-          funnelSessions.add(sid);
-        }
-      }
+    for (let i = 0; i <= k; i++) {
+      selectParts.push(
+        `SELECT DISTINCT session_id FROM analytics_events WHERE event_type = ? AND created_at >= ? AND created_at < ?`,
+      );
+      params.push(FUNNEL_STEPS[i].event_type, start, end);
     }
 
-    const uniqueSessions = funnelSessions.size;
-    const previousCount = steps.length > 0 ? steps[steps.length - 1].unique_sessions : 0;
+    const innerSql = selectParts.join('\nINTERSECT\n');
+    const sql = `SELECT COUNT(*) AS cnt FROM (\n${innerSql}\n)`;
 
+    const [row] = await db.query<{ cnt: number }>(sql, params);
+    const uniqueSessions = row?.cnt ?? 0;
+
+    const previousCount = steps.length > 0 ? steps[steps.length - 1].unique_sessions : 0;
     const dropOffPct =
       steps.length === 0 || previousCount === 0
         ? 0
         : Math.round(((previousCount - uniqueSessions) / previousCount) * 10000) / 100;
 
     steps.push({
-      name: step.name,
-      event_type: step.event_type,
+      name: FUNNEL_STEPS[k].name,
+      event_type: FUNNEL_STEPS[k].event_type,
       unique_sessions: uniqueSessions,
       drop_off_pct: dropOffPct,
     });
-
-    previousSessions = funnelSessions;
   }
 
   return c.json({ period, steps }, 200);

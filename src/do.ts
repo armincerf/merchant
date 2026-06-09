@@ -9,6 +9,20 @@ import { generateOrderNumber, now, uuid } from './types';
  */
 export type MerchantEnv = Env;
 
+// ─── Data retention constants ────────────────────────────────────────────────
+
+/** How many days to keep analytics_events and analytics_sessions rows. */
+const ANALYTICS_RETENTION_DAYS = 90;
+
+/**
+ * How many days to keep rows in the `events` table (Stripe webhook idempotency
+ * store). Stripe retries webhooks for at most ~3 days, so 30 days is safe.
+ */
+const EVENTS_RETENTION_DAYS = 30;
+
+/** How many days to keep webhook_deliveries rows. */
+const DELIVERIES_RETENTION_DAYS = 30;
+
 export type WSEventType =
   | 'cart.updated'
   | 'cart.checked_out'
@@ -2221,6 +2235,78 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       currency,
       items: orderItemsResult,
       oversold,
+    };
+  }
+
+  /**
+   * Delete old analytics and operational records to bound table growth.
+   *
+   * Uses LIMIT-bounded subselects so each cron invocation (every 5 min) only
+   * removes at most 1 000 rows per table — keeping each run cheap.
+   *
+   * Retention windows:
+   *   analytics_events   — ANALYTICS_RETENTION_DAYS (90)
+   *   analytics_sessions — ANALYTICS_RETENTION_DAYS (90), keyed on last_seen_at.
+   *                        Sessions are deleted after their events (events-first
+   *                        ordering) so the soft FK reference is already gone.
+   *   events             — EVENTS_RETENTION_DAYS (30). This table doubles as the
+   *                        Stripe webhook idempotency store (claimEvent). 30 days
+   *                        is safe because Stripe retries at most ~3 days after
+   *                        first delivery, so any row older than 30 days will
+   *                        never be checked again.
+   *   webhook_deliveries — DELIVERIES_RETENTION_DAYS (30).
+   */
+  async pruneOldData(): Promise<{
+    analyticsEvents: number;
+    analyticsSessions: number;
+    stripeEvents: number;
+    webhookDeliveries: number;
+  }> {
+    this.ensureInitialized();
+
+    // Delete analytics_events first so analytics_sessions soft-FK rows are
+    // already gone before we prune sessions.
+    const eventsResult = this.run(
+      `DELETE FROM analytics_events
+       WHERE id IN (
+         SELECT id FROM analytics_events
+         WHERE created_at < datetime('now', '-${ANALYTICS_RETENTION_DAYS} days')
+         LIMIT 1000
+       )`,
+    );
+
+    const sessionsResult = this.run(
+      `DELETE FROM analytics_sessions
+       WHERE id IN (
+         SELECT id FROM analytics_sessions
+         WHERE last_seen_at < datetime('now', '-${ANALYTICS_RETENTION_DAYS} days')
+         LIMIT 1000
+       )`,
+    );
+
+    const stripeEventsResult = this.run(
+      `DELETE FROM events
+       WHERE id IN (
+         SELECT id FROM events
+         WHERE processed_at < datetime('now', '-${EVENTS_RETENTION_DAYS} days')
+         LIMIT 1000
+       )`,
+    );
+
+    const deliveriesResult = this.run(
+      `DELETE FROM webhook_deliveries
+       WHERE id IN (
+         SELECT id FROM webhook_deliveries
+         WHERE created_at < datetime('now', '-${DELIVERIES_RETENTION_DAYS} days')
+         LIMIT 1000
+       )`,
+    );
+
+    return {
+      analyticsEvents: eventsResult.changes,
+      analyticsSessions: sessionsResult.changes,
+      stripeEvents: stripeEventsResult.changes,
+      webhookDeliveries: deliveriesResult.changes,
     };
   }
 

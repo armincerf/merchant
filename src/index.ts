@@ -129,10 +129,22 @@ export default {
   },
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
     const id = env.MERCHANT.idFromName('default');
-    const stub = env.MERCHANT.get(id);
-    const cleaned = await (
-      stub as unknown as { cleanupExpiredCarts: () => Promise<number> }
-    ).cleanupExpiredCarts();
+    const stub = env.MERCHANT.get(id) as unknown as {
+      cleanupExpiredCarts: () => Promise<number>;
+      pruneOldData: () => Promise<{
+        analyticsEvents: number;
+        analyticsSessions: number;
+        stripeEvents: number;
+        webhookDeliveries: number;
+      }>;
+    };
+
+    const cleaned = await stub.cleanupExpiredCarts();
     console.log(`Cron: cleaned ${cleaned} expired carts`);
+
+    const pruned = await stub.pruneOldData();
+    console.log(
+      `Cron: pruned analytics_events=${pruned.analyticsEvents} analytics_sessions=${pruned.analyticsSessions} stripe_events=${pruned.stripeEvents} webhook_deliveries=${pruned.webhookDeliveries}`,
+    );
   },
 };
