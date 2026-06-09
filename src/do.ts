@@ -41,7 +41,12 @@ export type DomainError =
   | { ok: false; code: 'discount_invalid'; message: string }
   | { ok: false; code: 'product_not_found'; message: string }
   | { ok: false; code: 'product_has_orders'; message: string }
-  | { ok: false; code: 'cart_empty'; message: string };
+  | { ok: false; code: 'cart_empty'; message: string }
+  | { ok: false; code: 'already_finalized'; message: string; orderId: string };
+
+export interface ClaimEventResult {
+  claimed: boolean;
+}
 
 export interface CartItemPayload {
   sku: string;
@@ -370,6 +375,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_email ON orders(customer_email);
 CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_email_created ON orders(customer_email, created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_number ON orders(number);
+CREATE INDEX IF NOT EXISTS idx_orders_stripe_session ON orders(stripe_checkout_session_id);
 
 CREATE TABLE IF NOT EXISTS order_items (
   id TEXT PRIMARY KEY,
@@ -539,6 +545,25 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       .filter((s) => s.length > 0);
     for (const stmt of statements) {
       this.sql.exec(stmt);
+    }
+    // Belt-and-braces: unique index on orders(stripe_checkout_session_id) for non-NULL values.
+    // Executed separately and guarded with try/catch because:
+    //   1. The WHERE clause in a partial index contains no semicolons, so it *could* go in SCHEMA,
+    //      but splitting SCHEMA on ';' is fragile with complex clauses.
+    //   2. Pre-existing deployed DBs may theoretically have rows where stripe_checkout_session_id
+    //      was accidentally duplicated. CREATE UNIQUE INDEX would throw on such a DB.
+    //      We log the warning and continue — the application-level claimEvent guard still protects
+    //      against double-finalization; the index is defence-in-depth.
+    try {
+      this.sql.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_stripe_session_unique ON orders(stripe_checkout_session_id) WHERE stripe_checkout_session_id IS NOT NULL`,
+      );
+    } catch (err) {
+      console.warn(
+        'Could not create unique index on orders(stripe_checkout_session_id) — pre-existing duplicates detected. ' +
+          'Run a de-duplication migration before retrying.',
+        err,
+      );
     }
     this.initialized = true;
   }
@@ -1263,8 +1288,19 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     let orderNumber = '';
     let customerId = '';
     let orderItemsResult: OrderItemPayload[] = [];
+    let alreadyFinalizedOrderId: string | null = null;
 
     this.ctx.storage.transactionSync(() => {
+      // Belt-and-braces: if an order for this Stripe session already exists, skip creation.
+      const [existingOrder] = this.sqlQuery<{ id: string }>(
+        `SELECT id FROM orders WHERE stripe_checkout_session_id = ?`,
+        [stripeSessionId],
+      );
+      if (existingOrder) {
+        alreadyFinalizedOrderId = existingOrder.id;
+        return;
+      }
+
       const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
         cartId,
       ]);
@@ -1472,6 +1508,15 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
         data: { sku, available },
         timestamp: new Date().toISOString(),
       });
+    }
+
+    if (alreadyFinalizedOrderId !== null) {
+      return {
+        ok: false,
+        code: 'already_finalized',
+        message: `Order already exists for Stripe session ${stripeSessionId}`,
+        orderId: alreadyFinalizedOrderId,
+      };
     }
 
     return {
@@ -1772,6 +1817,29 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
 
       return { ok: true as const };
     }) as { ok: true } | DomainError;
+  }
+
+  /**
+   * Atomically claim a Stripe event for processing using INSERT OR IGNORE.
+   * Returns {claimed: true} if this call inserted the row (first delivery wins).
+   * Returns {claimed: false} if the row already existed (duplicate delivery — safe to skip).
+   */
+  claimEvent(stripeEventId: string, type: string, payload: string): ClaimEventResult {
+    this.ensureInitialized();
+    const result = this.sqlRun(
+      `INSERT OR IGNORE INTO events (id, stripe_event_id, type, payload) VALUES (?, ?, ?, ?)`,
+      [uuid(), stripeEventId, type, payload],
+    );
+    return { claimed: result.changes > 0 };
+  }
+
+  /**
+   * Release a previously claimed Stripe event so Stripe's next retry can reprocess it.
+   * Called only when processing fails with an unexpected error — NOT for domain no-ops.
+   */
+  releaseEventClaim(stripeEventId: string): void {
+    this.ensureInitialized();
+    this.sqlRun(`DELETE FROM events WHERE stripe_event_id = ?`, [stripeEventId]);
   }
 
   // ─── WebSocket Authorization ────────────────────────────────────────────────

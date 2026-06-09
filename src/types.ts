@@ -1,6 +1,7 @@
 import {
   type CartPayload,
   type CheckoutReadyPayload,
+  type ClaimEventResult,
   type DomainError,
   type FinalizeOrderArgs,
   type FinalizeOrderResult,
@@ -38,6 +39,9 @@ export type DOStub = {
   finalizeOrderFromCart: (args: FinalizeOrderArgs) => Promise<FinalizeOrderResult | DomainError>;
   createTestOrder: (args: TestOrderArgs) => Promise<TestOrderResult | DomainError>;
   deleteProductCascade: (productId: string) => Promise<{ ok: true } | DomainError>;
+  // Stripe event idempotency
+  claimEvent: (stripeEventId: string, type: string, payload: string) => Promise<ClaimEventResult>;
+  releaseEventClaim: (stripeEventId: string) => Promise<void>;
 };
 
 export type Variables = {
