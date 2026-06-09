@@ -328,7 +328,7 @@ POST   /v1/webhooks/{id}/deliveries/{deliveryId}/retry
 POST /v1/webhooks/stripe    # set this as your Stripe webhook URL
 ```
 
-Events handled: `checkout.session.completed` → creates order, deducts inventory.
+Events handled: `checkout.session.completed` → creates order, deducts inventory; `checkout.session.expired` → releases reserved inventory and discount usage for abandoned checkouts. Configure your Stripe webhook endpoint to send both.
 
 ```bash
 # Local development
@@ -405,7 +405,7 @@ cd admin && npm install && npm run dev
 
 # Vanilla JS example storefront (connect with pk_... key)
 cd example && npm run dev
-# Edit example/src/config.js with your public key, then open http://localhost:3000
+# Copy example/src/api.example.js to api.js and set your public key, then open http://localhost:3000
 ```
 
 ## Stack
