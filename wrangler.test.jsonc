@@ -1,0 +1,25 @@
+{
+  // Minimal wrangler config for integration tests.
+  // Inherits from wrangler.jsonc but omits the R2 bucket (IMAGES) and cron
+  // triggers, which are not needed for the test suite and can cause issues
+  // with vitest-pool-workers isolation.
+  "name": "merchant-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-12-01",
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MERCHANT",
+        "class_name": "MerchantDO"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MerchantDO"]
+    }
+  ]
+}
