@@ -123,6 +123,10 @@ export interface FinalizeOrderResult {
   skuAvailability: Array<{ sku: string; available: number }>;
 }
 
+export type ReleaseAbandonedCheckoutResult =
+  | { released: true; skuAvailability: Array<{ sku: string; available: number }> }
+  | { released: false; reason: 'not_found' | 'wrong_status' };
+
 export interface TestOrderArgs {
   customerEmail: string;
   items: Array<{ sku: string; qty: number }>;
@@ -1136,6 +1140,98 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
   }
 
   /**
+   * Release inventory reservations and discount usage for an abandoned checkout.
+   *
+   * Idempotent: if the cart doesn't exist or is not in 'checked_out' status
+   * (e.g. it was already finalized into an order, which sets status='expired',
+   * or already released by a prior call), this is a no-op.
+   *
+   * Only decrements discount usage_count if the discount has a usage_limit
+   * (mirrors the reservation logic in cartBeginCheckout).
+   *
+   * Broadcasts inventory.updated after commit.
+   */
+  releaseAbandonedCheckout(cartId: string): ReleaseAbandonedCheckoutResult {
+    this.ensureInitialized();
+
+    const skuAvailability: Array<{ sku: string; available: number }> = [];
+
+    const released = this.ctx.storage.transactionSync(() => {
+      const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
+        cartId,
+      ]);
+      if (!cart) return false;
+      if (cart.status !== 'checked_out') return false;
+
+      const items = this.sqlQuery<{ sku: string; qty: number }>(
+        `SELECT sku, qty FROM cart_items WHERE cart_id = ?`,
+        [cartId],
+      );
+
+      // Release inventory reservations
+      for (const item of items) {
+        this.sqlRun(
+          `UPDATE inventory SET reserved = MAX(reserved - ?, 0), updated_at = ? WHERE sku = ?`,
+          [item.qty, now(), item.sku],
+        );
+      }
+
+      // Decrement usage_count only for usage-limited discounts
+      if (cart.discount_id) {
+        const [discountRow] = this.sqlQuery<{ usage_limit: number | null }>(
+          `SELECT usage_limit FROM discounts WHERE id = ?`,
+          [cart.discount_id as string],
+        );
+        if (discountRow?.usage_limit !== null) {
+          this.sqlRun(
+            `UPDATE discounts SET usage_count = MAX(usage_count - 1, 0), updated_at = ? WHERE id = ?`,
+            [now(), cart.discount_id as string],
+          );
+        }
+      }
+
+      // Mark cart expired and remove items (consistent with cleanupExpiredCarts)
+      this.sqlRun(`UPDATE carts SET status = 'expired', updated_at = ? WHERE id = ?`, [
+        now(),
+        cartId,
+      ]);
+      this.sqlRun(`DELETE FROM cart_items WHERE cart_id = ?`, [cartId]);
+
+      // Collect availability after updates for broadcast
+      for (const item of items) {
+        const [inv] = this.sqlQuery<{ on_hand: number; reserved: number }>(
+          `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
+          [item.sku],
+        );
+        skuAvailability.push({
+          sku: item.sku,
+          available: inv ? Math.max(0, inv.on_hand - inv.reserved) : 0,
+        });
+      }
+
+      return true;
+    }) as boolean;
+
+    if (!released) {
+      const [cart] = this.sqlQuery<{ status: string }>(`SELECT status FROM carts WHERE id = ?`, [
+        cartId,
+      ]);
+      return { released: false, reason: cart ? 'wrong_status' : 'not_found' };
+    }
+
+    // Broadcast inventory updates after commit
+    for (const { sku, available } of skuAvailability) {
+      this.broadcast({
+        type: 'inventory.updated',
+        data: { sku, available },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return { released: true, skuAvailability };
+  }
+
+  /**
    * Finalize order from a completed Stripe checkout session.
    * Everything from customer upsert through order insert, order_items,
    * discount_usage recording, inventory decrement + logs, cart status flip.
@@ -1860,47 +1956,61 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
 
     const now_ = new Date().toISOString();
 
+    // Phase 1: expire open carts past their expiry time
     const expiredCarts = this.query<{ id: string }>(
       `SELECT id FROM carts WHERE status = 'open' AND expires_at < ?`,
       [now_],
     );
 
-    if (expiredCarts.length === 0) return 0;
+    if (expiredCarts.length > 0) {
+      const cartIds = expiredCarts.map((c) => c.id);
+      const placeholders = cartIds.map(() => '?').join(',');
 
-    const cartIds = expiredCarts.map((c) => c.id);
-    const placeholders = cartIds.map(() => '?').join(',');
-
-    const reservedItems = this.query<{ sku: string; qty: number }>(
-      `SELECT sku, SUM(qty) as qty FROM cart_items WHERE cart_id IN (${placeholders}) GROUP BY sku`,
-      cartIds,
-    );
-
-    this.ctx.storage.transactionSync(() => {
-      for (const item of reservedItems) {
-        this.sqlRun(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [
-          item.qty,
-          item.sku,
-        ]);
-      }
-
-      this.sqlRun(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
-      this.sqlRun(`DELETE FROM cart_items WHERE cart_id IN (${placeholders})`, cartIds);
-    });
-
-    // Broadcast inventory updates for each affected SKU
-    for (const item of reservedItems) {
-      const [inv] = this.query<{ on_hand: number; reserved: number }>(
-        `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
-        [item.sku],
+      const reservedItems = this.query<{ sku: string; qty: number }>(
+        `SELECT sku, SUM(qty) as qty FROM cart_items WHERE cart_id IN (${placeholders}) GROUP BY sku`,
+        cartIds,
       );
-      const available = inv ? Math.max(0, inv.on_hand - inv.reserved) : 0;
-      this.broadcast({
-        type: 'inventory.updated',
-        data: { sku: item.sku, available },
-        timestamp: new Date().toISOString(),
+
+      this.ctx.storage.transactionSync(() => {
+        for (const item of reservedItems) {
+          this.sqlRun(`UPDATE inventory SET reserved = MAX(reserved - ?, 0) WHERE sku = ?`, [
+            item.qty,
+            item.sku,
+          ]);
+        }
+
+        this.sqlRun(`UPDATE carts SET status = 'expired' WHERE id IN (${placeholders})`, cartIds);
+        this.sqlRun(`DELETE FROM cart_items WHERE cart_id IN (${placeholders})`, cartIds);
       });
+
+      // Broadcast inventory updates for each affected SKU
+      for (const item of reservedItems) {
+        const [inv] = this.query<{ on_hand: number; reserved: number }>(
+          `SELECT on_hand, reserved FROM inventory WHERE sku = ?`,
+          [item.sku],
+        );
+        const available = inv ? Math.max(0, inv.on_hand - inv.reserved) : 0;
+        this.broadcast({
+          type: 'inventory.updated',
+          data: { sku: item.sku, available },
+          timestamp: new Date().toISOString(),
+        });
+      }
     }
 
-    return expiredCarts.length;
+    // Phase 2: release checked_out carts whose Stripe session has expired
+    // (webhook lost or never delivered — acts as a cron fallback)
+    const abandonedCarts = this.query<{ id: string }>(
+      `SELECT id FROM carts WHERE status = 'checked_out' AND expires_at < ?`,
+      [now_],
+    );
+
+    for (const { id: cartId } of abandonedCarts) {
+      // releaseAbandonedCheckout is idempotent: safe to call even if a webhook
+      // already processed the cart between the SELECT and this call
+      this.releaseAbandonedCheckout(cartId);
+    }
+
+    return expiredCarts.length + abandonedCarts.length;
   }
 }

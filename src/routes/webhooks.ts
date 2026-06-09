@@ -47,6 +47,19 @@ webhooks.post('/stripe', async (c) => {
   ]);
   if (existing) return c.json({ ok: true });
 
+  if (event.type === 'checkout.session.expired') {
+    const expiredSession = event.data.object as Stripe.Checkout.Session;
+    const cartId = expiredSession.metadata?.cart_id;
+
+    if (cartId) {
+      // Release inventory reservations and discount usage for the abandoned cart.
+      // releaseAbandonedCheckout is idempotent: if the cart was already finalized
+      // (status='expired' via finalizeOrderFromCart) or already released, this is
+      // a no-op, so double-processing is safe.
+      await c.var.db.releaseAbandonedCheckout(cartId);
+    }
+  }
+
   if (event.type === 'checkout.session.completed') {
     const webhookSession = event.data.object as Stripe.Checkout.Session;
 
