@@ -2,7 +2,7 @@ import { createRoute } from '@hono/zod-openapi';
 import { getDb } from '../db';
 import { createApp } from '../lib/app';
 import { parseCompositeCursor } from '../lib/pagination';
-import { getStripe } from '../lib/stripe';
+import { getStripe, getStripeConfig } from '../lib/stripe';
 import { dispatchWebhooks, type WebhookEventType } from '../lib/webhooks';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import { idempotencyMiddleware } from '../middleware/idempotency';
@@ -249,10 +249,12 @@ app.openapi(refundOrder, async (c) => {
   const { orderId } = c.req.valid('param');
   const { amount_cents } = c.req.valid('json');
 
-  const stripeSecretKey = c.get('auth').stripeSecretKey;
-  if (!stripeSecretKey) throw ApiError.invalidRequest('Stripe not connected');
-
   const db = getDb(c.var.db);
+
+  const { secretKey: stripeSecretKey } = await getStripeConfig(db, c.env);
+  if (!stripeSecretKey) {
+    throw ApiError.invalidRequest('Stripe not connected. POST /v1/setup/stripe first.');
+  }
 
   const [order] = await db.query<any>(`SELECT * FROM orders WHERE id = ?`, [orderId]);
   if (!order) throw ApiError.notFound('Order not found');

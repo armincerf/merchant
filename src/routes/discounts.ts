@@ -4,7 +4,7 @@ import { type Database, getDb } from '../db';
 import { createApp } from '../lib/app';
 import { type Discount as _Discount, validateDiscountFields } from '../lib/discounts';
 import { parseCompositeCursor } from '../lib/pagination';
-import { getStripe } from '../lib/stripe';
+import { getStripe, getStripeConfig } from '../lib/stripe';
 import { adminOnly, authMiddleware } from '../middleware/auth';
 import {
   CreateDiscountBody,
@@ -293,8 +293,8 @@ app.openapi(createDiscount, async (c) => {
     throw ApiError.invalidRequest('percentage value must be between 0 and 100');
   }
 
-  const stripeSecretKey = c.get('auth').stripeSecretKey;
   const db = getDb(c.var.db);
+  const { secretKey: stripeSecretKey } = await getStripeConfig(db, c.env);
 
   const normalizedCode = code ? code.toUpperCase().trim() : null;
 
@@ -421,8 +421,8 @@ app.openapi(updateDiscount, async (c) => {
     usage_limit_per_customer,
   } = body;
 
-  const stripeSecretKey = c.get('auth').stripeSecretKey;
   const db = getDb(c.var.db);
+  const { secretKey: stripeSecretKey } = await getStripeConfig(db, c.env);
 
   const [existing] = await db.query<any>(`SELECT * FROM discounts WHERE id = ?`, [id]);
   if (!existing) throw ApiError.notFound('Discount not found');

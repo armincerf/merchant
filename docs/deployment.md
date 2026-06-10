@@ -70,6 +70,8 @@ curl -X POST https://your-store.workers.dev/v1/setup/stripe \
 
 Merchant validates the key against the Stripe balance endpoint before saving. The `stripe_webhook_secret` is optional at this step — you can add it after setting up the webhook in Stripe.
 
+This is the single source of truth for Stripe credentials: checkout, refunds, discount sync, webhook verification, and UCP all read the keys saved here, and you can rotate them at any time by calling the endpoint again — no redeploy needed. (For local development, the `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` environment variables act as per-field overrides; see [Environment variables](#environment-variables).)
+
 ### Configure the Stripe webhook
 
 In the Stripe dashboard (or via the Stripe CLI), create a webhook endpoint pointing to:
@@ -113,6 +115,8 @@ Set via `wrangler secret put <NAME>` for secrets, or in the `vars` block in `wra
 | `IMAGES_URL` | Var | Public base URL for R2-served images (e.g. `https://images.your-store.com`). Leave empty if the R2 bucket is not publicly accessible. |
 | `OAUTH_DEV_LINKS` | Var | Set to `"true"` in local dev only to render magic links in the OAuth HTML response. **Never set in production.** |
 | `STORE_NAME` | Var | Store name shown in the OAuth consent page (optional; defaults to `"Store"`) |
+| `STRIPE_SECRET_KEY` | Secret | Optional **override** for the Stripe secret key, intended for local dev/tests. Normal setup is `POST /v1/setup/stripe` (see above), which needs no env vars. When set, the env value wins over the stored config. |
+| `STRIPE_WEBHOOK_SECRET` | Secret | Optional **override** for the Stripe webhook signing secret. Same semantics as `STRIPE_SECRET_KEY`. |
 
 ### R2 public access and `IMAGES_URL`
 

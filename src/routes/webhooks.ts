@@ -2,7 +2,7 @@ import type { Context } from 'hono';
 import { Hono } from 'hono';
 import type Stripe from 'stripe';
 import { getDb } from '../db';
-import { getStripe } from '../lib/stripe';
+import { getStripe, getStripeConfig } from '../lib/stripe';
 import { dispatchWebhooks } from '../lib/webhooks';
 import { ApiError, type HonoEnv } from '../types';
 import { handleUCPStripeWebhook } from './ucp';
@@ -22,23 +22,21 @@ webhooks.post('/stripe', async (c) => {
 
   const db = getDb(c.var.db);
 
-  // Get stripe keys from config
-  const [config] = await db.query<any>(`SELECT * FROM config WHERE key = 'stripe'`);
-  if (!config?.value) {
+  // Same credential source as checkout/refunds: config table, env override.
+  const stripeConfig = await getStripeConfig(db, c.env);
+  if (!stripeConfig.secretKey) {
     throw ApiError.invalidRequest('Stripe not configured');
   }
-
-  const stripeConfig = JSON.parse(config.value);
-  if (!stripeConfig.webhook_secret) {
+  if (!stripeConfig.webhookSecret) {
     throw ApiError.invalidRequest('Stripe webhook secret not configured');
   }
 
   // Verify signature
-  const stripe = getStripe(stripeConfig.secret_key);
+  const stripe = getStripe(stripeConfig.secretKey);
   let event: Stripe.Event;
 
   try {
-    event = await stripe.webhooks.constructEventAsync(body, signature, stripeConfig.webhook_secret);
+    event = await stripe.webhooks.constructEventAsync(body, signature, stripeConfig.webhookSecret);
   } catch (e: any) {
     throw new ApiError('webhook_signature_invalid', 400, e.message);
   }

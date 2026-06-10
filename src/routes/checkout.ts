@@ -4,7 +4,7 @@ import { getDb } from '../db';
 import type { CartPayload, CheckoutReadyPayload, DomainError } from '../do';
 import { createApp } from '../lib/app';
 import { checkoutWindow, OPEN_CART_TTL_MINUTES } from '../lib/checkout-window';
-import { getStripe } from '../lib/stripe';
+import { getStripe, getStripeConfig } from '../lib/stripe';
 import { authMiddleware } from '../middleware/auth';
 import { idempotencyMiddleware } from '../middleware/idempotency';
 import {
@@ -290,7 +290,7 @@ app.openapi(checkoutCart, async (c) => {
   const { success_url, cancel_url, collect_shipping, shipping_countries, shipping_options } =
     c.req.valid('json');
 
-  const stripeSecretKey = c.get('auth').stripeSecretKey;
+  const { secretKey: stripeSecretKey } = await getStripeConfig(getDb(c.var.db), c.env);
   if (!stripeSecretKey) {
     throw ApiError.invalidRequest('Stripe not connected. POST /v1/setup/stripe first.');
   }

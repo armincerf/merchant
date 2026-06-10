@@ -31,8 +31,6 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
 
   const token = authHeader.slice(7);
   const db = getDb(c.var.db);
-  const stripeSecretKey = c.env.STRIPE_SECRET_KEY || null;
-  const stripeWebhookSecret = c.env.STRIPE_WEBHOOK_SECRET || null;
 
   const isOAuthToken = token.length === 64 && /^[a-f0-9]+$/.test(token);
   if (isOAuthToken) {
@@ -50,8 +48,6 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
       const row = oauthResult[0];
       c.set('auth', {
         role: 'oauth',
-        stripeSecretKey,
-        stripeWebhookSecret,
         oauthScopes: row.scope?.split(' ') || [],
         customerEmail: row.customer_email,
       });
@@ -65,11 +61,7 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
 
   const memoized = keyRoleMemo.get(keyHash);
   if (memoized && memoized.expiresAt > Date.now()) {
-    c.set('auth', {
-      role: memoized.role,
-      stripeSecretKey,
-      stripeWebhookSecret,
-    });
+    c.set('auth', { role: memoized.role });
 
     await next();
     return;
@@ -88,11 +80,7 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
   }
   keyRoleMemo.set(keyHash, { role: result[0].role, expiresAt: Date.now() + AUTH_MEMO_TTL_MS });
 
-  c.set('auth', {
-    role: result[0].role,
-    stripeSecretKey,
-    stripeWebhookSecret,
-  });
+  c.set('auth', { role: result[0].role });
 
   await next();
 });

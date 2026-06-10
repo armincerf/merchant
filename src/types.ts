@@ -76,8 +76,6 @@ export type AuthRole = 'public' | 'admin' | 'oauth';
 
 export type AuthContext = {
   role: AuthRole;
-  stripeSecretKey: string | null;
-  stripeWebhookSecret: string | null;
   oauthScopes?: string[];
   customerEmail?: string;
 };

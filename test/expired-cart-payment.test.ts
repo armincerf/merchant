@@ -410,9 +410,8 @@ describe('checkout.session.completed for a live checked_out cart (happy path)', 
 
 describe('POST /carts/{id}/checkout', () => {
   it('creates the Stripe session with expires_at equal to the cart expires_at', async () => {
-    // The checkout route takes the Stripe key from the worker env.
-    (env as Record<string, unknown>).STRIPE_SECRET_KEY = 'sk_test_fake';
-
+    // Checkout reads the Stripe key from the config row seeded in beforeAll —
+    // the same source the webhook receiver uses (merchant-nx9).
     const email = 'window-buyer@example.com';
     const cartId = await createCart(email);
     await addItem(cartId, seed.sku, 1);

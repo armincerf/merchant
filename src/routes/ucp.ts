@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import Stripe from 'stripe';
-import { type Database, getDb } from '../db';
-import { getStripe } from '../lib/stripe';
+import { getDb } from '../db';
+import { getStripe, getStripeConfig } from '../lib/stripe';
 import { dispatchWebhooks } from '../lib/webhooks';
 import { authMiddleware, requireScope } from '../middleware/auth';
 import { ApiError, type HonoEnv, now, uuid } from '../types';
@@ -140,25 +140,6 @@ function activeCapabilities(): { name: string; version: string }[] {
   ];
 }
 
-async function getStripeConfig(
-  db: Database,
-): Promise<{ secretKey: string | null; webhookSecret: string | null }> {
-  const [config] = await db.query<{ value: string }>(
-    `SELECT value FROM config WHERE key = 'stripe'`,
-    [],
-  );
-  if (!config) return { secretKey: null, webhookSecret: null };
-  try {
-    const parsed = JSON.parse(config.value);
-    return {
-      secretKey: parsed.secret_key || null,
-      webhookSecret: parsed.webhook_secret || null,
-    };
-  } catch {
-    return { secretKey: null, webhookSecret: null };
-  }
-}
-
 /**
  * Validate a URL string: must parse as a valid URL with http: or https: protocol.
  * Throws ApiError.invalidRequest if invalid.
@@ -197,7 +178,7 @@ ucp.use('/ucp/v1/checkout-sessions*', requireScope('ucp:scopes:checkout_session'
 ucp.get('/.well-known/ucp', async (c) => {
   const baseUrl = new URL(c.req.url).origin;
   const db = getDb(c.var.db);
-  const stripeConfig = await getStripeConfig(db);
+  const stripeConfig = await getStripeConfig(db, c.env);
 
   // Build payment handlers based on Stripe config
   const paymentHandlers: UCPPaymentHandler[] = [];
@@ -399,7 +380,7 @@ ucp.post('/ucp/v1/checkout-sessions', async (c) => {
   );
 
   // Build payment handlers
-  const stripeConfig = await getStripeConfig(db);
+  const stripeConfig = await getStripeConfig(db, c.env);
   const paymentHandlers: UCPPaymentHandler[] = [];
 
   if (stripeConfig.secretKey) {
@@ -459,7 +440,7 @@ ucp.get('/ucp/v1/checkout-sessions/:id', async (c) => {
     session.status = 'canceled';
   }
 
-  const stripeConfig = await getStripeConfig(db);
+  const stripeConfig = await getStripeConfig(db, c.env);
   const paymentHandlers: UCPPaymentHandler[] = [];
 
   if (stripeConfig.secretKey) {
@@ -604,7 +585,7 @@ ucp.put('/ucp/v1/checkout-sessions/:id', async (c) => {
     ],
   );
 
-  const stripeConfig = await getStripeConfig(db);
+  const stripeConfig = await getStripeConfig(db, c.env);
   const paymentHandlers: UCPPaymentHandler[] = [];
 
   if (stripeConfig.secretKey) {
@@ -732,7 +713,7 @@ ucp.post('/ucp/v1/checkout-sessions/:id/complete', async (c) => {
   const buyer = JSON.parse(session.buyer || '{}');
   const totals = JSON.parse(session.totals || '[]');
 
-  const stripeConfig = await getStripeConfig(db);
+  const stripeConfig = await getStripeConfig(db, c.env);
 
   // For UCP, we use Stripe Checkout redirect flow
   // The payment_data should indicate the handler being used
