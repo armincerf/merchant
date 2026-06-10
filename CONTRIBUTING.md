@@ -60,6 +60,34 @@ All database mutations go through `MerchantDO` in `src/do.ts`. Multi-step mutati
 
 See the [README architecture section](README.md#architecture) for the full data-flow diagram.
 
+## Schema Migrations
+
+The SQLite schema lives in `src/migrations.ts` as an append-only list of versioned migrations. On the first request after a deploy, the Durable Object applies any migrations not yet recorded in its `schema_migrations` table — each in its own transaction, so a failure rolls back cleanly and is retried on the next request.
+
+**To change the schema, append a new migration. Never edit an existing one** — including `001-baseline`. Existing deployments have already recorded shipped migrations as applied; editing one means new installs and existing installs end up with different schemas, and the runtime will refuse to start on a name/order mismatch.
+
+```ts
+// src/migrations.ts
+export const MIGRATIONS: readonly Migration[] = [
+  { name: '001-baseline', up(sql) { /* shipped — do not touch */ } },
+  // Add yours at the end:
+  {
+    name: '002-add-products-vendor',
+    up(sql) {
+      sql.exec(`ALTER TABLE products ADD COLUMN vendor TEXT`);
+    },
+  },
+];
+```
+
+Guidelines:
+
+- Name migrations `NNN-short-slug`, zero-padded, strictly increasing.
+- `up()` may run multiple statements (one `sql.exec` call can contain several, separated by `;`) and may migrate data, not just DDL. It runs inside a transaction — throw to abort.
+- Migrations must work on a database created at any previous version. Prefer additive changes (`ADD COLUMN` with a default, new tables, new indexes); SQLite's `ALTER TABLE` cannot drop or retype columns directly — use the [12-step recreate procedure](https://www.sqlite.org/lang_altertable.html#otherwise) if you truly must.
+- `PRAGMA user_version` is not available in Durable Object SQLite (workerd rejects it with `SQLITE_AUTH`) — that's why versioning uses the `schema_migrations` table.
+- Add a test in `test/migrations.test.ts` if your migration does anything beyond a simple additive statement (data backfills, index rebuilds).
+
 ## Pull Request Conventions
 
 - **Conventional commits.** Use `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`, `perf:`. If you are working from a tracked issue, include the issue id: `feat(merchant-abc): add X`.
