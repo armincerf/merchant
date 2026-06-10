@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import { getDb } from '../db';
 import type { CartPayload, CheckoutReadyPayload, DomainError } from '../do';
 import { createApp } from '../lib/app';
+import { checkoutWindow, OPEN_CART_TTL_MINUTES } from '../lib/checkout-window';
 import { getStripe } from '../lib/stripe';
 import { authMiddleware } from '../middleware/auth';
 import { idempotencyMiddleware } from '../middleware/idempotency';
@@ -106,7 +107,7 @@ app.openapi(createCart, async (c) => {
 
   const db = getDb(c.var.db);
   const id = uuid();
-  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + OPEN_CART_TTL_MINUTES * 60 * 1000).toISOString();
 
   await db.run(`INSERT INTO carts (id, customer_email, expires_at) VALUES (?, ?, ?)`, [
     id,
@@ -387,12 +388,18 @@ app.openapi(checkoutCart, async (c) => {
     },
   ];
 
+  // One instant drives both the Stripe session expiry and the cart expiry:
+  // the cron releases inventory for carts past expires_at, so the session
+  // must stop being payable at that same moment (merchant-wie).
+  const expiry = checkoutWindow();
+
   let session;
   try {
     session = await stripe.checkout.sessions.create({
       mode: 'payment',
       customer_email: cart.customer_email,
       automatic_tax: { enabled: true },
+      expires_at: expiry.stripeExpiresAt,
       ...(collect_shipping && {
         shipping_address_collection: {
           allowed_countries:
@@ -418,12 +425,10 @@ app.openapi(checkoutCart, async (c) => {
     throw ApiError.invalidRequest('Payment processing error. Please try again.');
   }
 
-  // Extend expires_at to 60 min to cover Stripe hosted checkout time
-  const checkoutExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
   const db = getDb(c.var.db);
   await db.run(
     `UPDATE carts SET stripe_checkout_session_id = ?, discount_amount_cents = ?, expires_at = ?, updated_at = ? WHERE id = ?`,
-    [session.id, discountAmountCents, checkoutExpiresAt, now(), cartId],
+    [session.id, discountAmountCents, expiry.cartExpiresAt, now(), cartId],
   );
 
   return c.json(

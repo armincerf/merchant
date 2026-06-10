@@ -76,6 +76,7 @@ The new secret takes effect immediately. Update your server before rotating.
 | `order.updated` | exact | An order's status, tracking number, or other fields change |
 | `order.shipped` | exact | An order's status is set to `shipped` |
 | `order.refunded` | exact | A refund is processed |
+| `order.failed` | exact | A payment arrived for a cart whose reservation was already released; the payment was auto-refunded (or needs manual attention) instead of becoming an order |
 | `inventory.low` | exact | A SKU's available quantity drops to 5 or below |
 
 ### Subscription patterns
@@ -137,6 +138,22 @@ The `data` value for `inventory.low`:
 
 ```json
 {"sku": "TEE-BLK-M", "available": 3, "threshold": 5}
+```
+
+The `data` value for `order.failed` (no order exists; `refund.status` is `refunded`, `refund_failed`, or `no_payment_intent` — anything other than `refunded` needs a manual refund in the Stripe dashboard):
+
+```json
+{
+  "reason": "cart_released",
+  "cart_id": "cart-uuid",
+  "customer_email": "buyer@example.com",
+  "amounts": {"total_cents": 4900, "currency": "USD"},
+  "refund": {"id": "re_...", "status": "refunded"},
+  "stripe": {
+    "checkout_session_id": "cs_...",
+    "payment_intent_id": "pi_..."
+  }
+}
 ```
 
 ## Delivery headers

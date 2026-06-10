@@ -6,6 +6,7 @@ import {
   type FinalizeOrderArgs,
   type FinalizeOrderResult,
   type MerchantDO,
+  type PaymentAnomalyArgs,
   type ReleaseAbandonedCheckoutResult,
   type TestOrderArgs,
   type TestOrderResult,
@@ -39,6 +40,7 @@ export type DOStub = {
   cartRevertCheckout: (cartId: string, releaseDiscountId?: string) => Promise<void>;
   releaseAbandonedCheckout: (cartId: string) => Promise<ReleaseAbandonedCheckoutResult>;
   finalizeOrderFromCart: (args: FinalizeOrderArgs) => Promise<FinalizeOrderResult | DomainError>;
+  recordPaymentAnomaly: (args: PaymentAnomalyArgs) => Promise<{ id: string }>;
   createTestOrder: (args: TestOrderArgs) => Promise<TestOrderResult | DomainError>;
   deleteProductCascade: (productId: string) => Promise<{ ok: true } | DomainError>;
   ucpFinalizeOrder: (args: UCPFinalizeOrderArgs) => Promise<UCPFinalizeOrderResult | DomainError>;

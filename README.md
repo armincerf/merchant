@@ -238,7 +238,7 @@ POST /v1/carts/{id}/checkout
 # Returns a Stripe Checkout URL. Stripe Tax is enabled automatically.
 ```
 
-Carts expire 30 minutes after creation (extended to 60 minutes once checkout is initiated).
+Carts expire 30 minutes after creation (extended to 60 minutes once checkout is initiated; the Stripe Checkout Session is created with the same expiry, so a session can never outlive its cart).
 
 ### Orders (admin)
 
@@ -339,6 +339,8 @@ POST /v1/webhooks/stripe    # set this as your Stripe webhook URL
 ```
 
 Events handled: `checkout.session.completed` → creates order, deducts inventory; `checkout.session.expired` → releases reserved inventory and discount usage for abandoned checkouts. Configure your Stripe webhook endpoint to send both.
+
+If a `checkout.session.completed` arrives for a cart whose reservation was already released (lost webhook + cron fallback), no order is created: the payment is automatically refunded, recorded in the `payment_anomalies` table, and an `order.failed` webhook is dispatched.
 
 ```bash
 # Local development

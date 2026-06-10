@@ -27,6 +27,13 @@ const DELIVERIES_RETENTION_DAYS = 30;
 /** How many hours to keep idempotency_keys rows (Stripe-style 24-hour window). */
 const IDEMPOTENCY_RETENTION_HOURS = 24;
 
+/**
+ * How long past a checked_out cart's expiry the cron waits before releasing
+ * its inventory, so a checkout.session.completed webhook for a last-second
+ * payment can finalize the order first (see cleanupExpiredCarts Phase 2).
+ */
+const RELEASE_GRACE_MINUTES = 10;
+
 export type WSEventType =
   | 'cart.updated'
   | 'cart.checked_out'
@@ -56,7 +63,13 @@ export type DomainError =
   | { ok: false; code: 'product_not_found'; message: string }
   | { ok: false; code: 'product_has_orders'; message: string }
   | { ok: false; code: 'cart_empty'; message: string }
-  | { ok: false; code: 'already_finalized'; message: string; orderId: string };
+  | { ok: false; code: 'already_finalized'; message: string; orderId: string }
+  | {
+      ok: false;
+      code: 'cart_released';
+      message: string;
+      details: { cartId: string; cartStatus: string };
+    };
 
 export interface ClaimEventResult {
   claimed: boolean;
@@ -145,6 +158,19 @@ export interface FinalizeOrderResult {
 export type ReleaseAbandonedCheckoutResult =
   | { released: true; skuAvailability: Array<{ sku: string; available: number }> }
   | { released: false; reason: 'not_found' | 'wrong_status' };
+
+export interface PaymentAnomalyArgs {
+  type: 'orphaned_payment';
+  cartId: string | null;
+  stripeSessionId: string;
+  stripePaymentIntentId: string | null;
+  amountCents: number;
+  currency: string;
+  customerEmail: string | null;
+  refundId: string | null;
+  refundStatus: 'refunded' | 'refund_failed' | 'no_payment_intent';
+  message: string;
+}
 
 // ─── UCP Finalize Order ─────────────────────────────────────────────────────
 
@@ -910,6 +936,13 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
    * Everything from customer upsert through order insert, order_items,
    * discount_usage recording, inventory decrement + logs, cart status flip.
    * Broadcasts inventory.updated after commit.
+   *
+   * Refuses with `cart_released` if the cart is no longer 'checked_out' or
+   * has no items: that means its inventory reservation was already released
+   * (cron Phase 2 or a checkout.session.expired webhook) and the stock may
+   * have been resold — creating an order here would produce a paid order
+   * with zero items. The caller must treat the payment as orphaned
+   * (refund + record) instead.
    */
   finalizeOrderFromCart(args: FinalizeOrderArgs): FinalizeOrderResult | DomainError {
     this.ensureInitialized();
@@ -938,6 +971,7 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
     let customerId = '';
     let orderItemsResult: OrderItemPayload[] = [];
     let alreadyFinalizedOrderId: string | null = null;
+    let guardError: DomainError | null = null;
 
     this.ctx.storage.transactionSync(() => {
       // Belt-and-braces: if an order for this Stripe session already exists, skip creation.
@@ -953,7 +987,10 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       const [cart] = this.sqlQuery<Record<string, unknown>>(`SELECT * FROM carts WHERE id = ?`, [
         cartId,
       ]);
-      if (!cart) return;
+      if (!cart) {
+        guardError = { ok: false, code: 'cart_not_found', message: `Cart ${cartId} not found` };
+        return;
+      }
 
       const items = this.sqlQuery<{
         sku: string;
@@ -961,6 +998,18 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
         qty: number;
         unit_price_cents: number;
       }>(`SELECT * FROM cart_items WHERE cart_id = ?`, [cartId]);
+
+      if (cart.status !== 'checked_out' || items.length === 0) {
+        guardError = {
+          ok: false,
+          code: 'cart_released',
+          message:
+            `Cart ${cartId} is '${cart.status}' with ${items.length} item(s) — its reservation ` +
+            `was already released, refusing to create an order`,
+          details: { cartId, cartStatus: cart.status as string },
+        };
+        return;
+      }
 
       // Upsert customer
       const [existingCustomer] = this.sqlQuery<{
@@ -1168,6 +1217,8 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       };
     }
 
+    if (guardError) return guardError;
+
     return {
       ok: true,
       orderId,
@@ -1176,6 +1227,37 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       items: orderItemsResult,
       skuAvailability,
     };
+  }
+
+  /**
+   * Record a payment that could not be turned into an order (see the
+   * payment_anomalies migration). Returns the row id.
+   */
+  recordPaymentAnomaly(args: PaymentAnomalyArgs): { id: string } {
+    this.ensureInitialized();
+
+    const id = uuid();
+    this.sqlRun(
+      `INSERT INTO payment_anomalies (id, type, cart_id, stripe_checkout_session_id,
+         stripe_payment_intent_id, amount_cents, currency, customer_email,
+         refund_id, refund_status, message, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        args.type,
+        args.cartId,
+        args.stripeSessionId,
+        args.stripePaymentIntentId,
+        args.amountCents,
+        args.currency,
+        args.customerEmail,
+        args.refundId,
+        args.refundStatus,
+        args.message,
+        now(),
+      ],
+    );
+    return { id };
   }
 
   /**
@@ -2085,11 +2167,19 @@ export class MerchantDO extends DurableObject<MerchantEnv> {
       }
     }
 
-    // Phase 2: release checked_out carts whose Stripe session has expired
-    // (webhook lost or never delivered — acts as a cron fallback)
+    // Phase 2: release checked_out carts past their expiry. The Stripe
+    // session expires at the same instant as the cart (both derive from one
+    // checkoutWindow() call in the checkout route), so by now the session is
+    // no longer payable; this is the fallback for a lost or undelivered
+    // checkout.session.expired webhook. The grace period lets a
+    // checkout.session.completed webhook for a payment made seconds before
+    // expiry finalize normally instead of racing the release; if a payment
+    // does slip through after release, finalizeOrderFromCart refuses with
+    // cart_released and the webhook handler refunds it.
+    const releaseCutoff = new Date(Date.now() - RELEASE_GRACE_MINUTES * 60 * 1000).toISOString();
     const abandonedCarts = this.query<{ id: string }>(
       `SELECT id FROM carts WHERE status = 'checked_out' AND expires_at < ?`,
-      [now_],
+      [releaseCutoff],
     );
 
     for (const { id: cartId } of abandonedCarts) {

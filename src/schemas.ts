@@ -623,6 +623,7 @@ export const WebhookEvent = z.enum([
   'order.updated',
   'order.shipped',
   'order.refunded',
+  'order.failed',
   'inventory.low',
   'order.*',
   '*',

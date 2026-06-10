@@ -504,6 +504,34 @@ export const MIGRATIONS: readonly Migration[] = [
       sql.exec(CACHE_VERSIONS_SCHEMA);
     },
   },
+  {
+    // Durable record of payments that arrived in a state we could not turn
+    // into an order (e.g. checkout.session.completed for a cart whose
+    // inventory was already released). The webhook handler auto-refunds and
+    // records the outcome here so the merchant has a permanent audit trail
+    // even if the alert webhook is never delivered.
+    name: '003-payment-anomalies',
+    up(sql) {
+      sql.exec(`
+CREATE TABLE IF NOT EXISTS payment_anomalies (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL CHECK (type IN ('orphaned_payment')),
+  cart_id TEXT,
+  stripe_checkout_session_id TEXT NOT NULL,
+  stripe_payment_intent_id TEXT,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  customer_email TEXT,
+  refund_id TEXT,
+  refund_status TEXT NOT NULL CHECK (refund_status IN ('refunded', 'refund_failed', 'no_payment_intent')),
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_payment_anomalies_created ON payment_anomalies(created_at);
+CREATE INDEX IF NOT EXISTS idx_payment_anomalies_session ON payment_anomalies(stripe_checkout_session_id);
+`);
+    },
+  },
 ];
 
 /**

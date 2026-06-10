@@ -25,6 +25,7 @@ const VALID_EVENTS = [
   'order.updated',
   'order.shipped',
   'order.refunded',
+  'order.failed',
   'inventory.low',
   'order.*',
   '*',
