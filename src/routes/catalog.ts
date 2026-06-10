@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
 import { createApp } from '../lib/app';
 import { adminOnly, authMiddleware } from '../middleware/auth';
+import { publicCache } from '../middleware/cache';
 import {
   CreateProductBody,
   CreateVariantBody,
@@ -41,6 +42,7 @@ const VariantIdParam = z.object({
 const app = createApp();
 
 app.use('*', authMiddleware);
+app.use('*', publicCache('catalog'));
 
 const listProducts = createRoute({
   method: 'get',

@@ -1,7 +1,13 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { getDb } from '../db';
 import { createApp } from '../lib/app';
-import { adminOnly, authMiddleware, generateApiKey, hashKey } from '../middleware/auth';
+import {
+  adminOnly,
+  authMiddleware,
+  clearAuthMemo,
+  generateApiKey,
+  hashKey,
+} from '../middleware/auth';
 import {
   ApiKeyListResponse,
   CreateApiKeyBody,
@@ -150,6 +156,9 @@ app.openapi(deleteKey, async (c) => {
   );
 
   if (result.changes > 0) {
+    // The auth middleware memoizes key→role lookups; drop the memo so the
+    // revoked key stops working in this isolate immediately.
+    clearAuthMemo();
     return c.json({ deleted: true as const }, 200);
   }
 

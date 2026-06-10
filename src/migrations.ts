@@ -406,6 +406,73 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys(created_at);
 `;
 
+/**
+ * Cache version counters for edge caching of public catalog reads.
+ *
+ * Worker-side middleware caches public catalog/availability GET responses in
+ * the per-colo Cache API under keys that embed these counters, so bumping a
+ * counter instantly invalidates every colo's entries (old keys never match
+ * again). The bumps live in SQLite triggers rather than application code so
+ * that no write path — route handler, DO domain method, cron, or future code
+ * — can forget one.
+ */
+const CACHE_VERSIONS_SCHEMA = `
+INSERT OR IGNORE INTO config (key, value) VALUES ('catalog_version', '1');
+INSERT OR IGNORE INTO config (key, value) VALUES ('inventory_version', '1');
+
+CREATE TRIGGER IF NOT EXISTS trg_products_ins_version AFTER INSERT ON products
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_products_upd_version AFTER UPDATE ON products
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_products_del_version AFTER DELETE ON products
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_variants_ins_version AFTER INSERT ON variants
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_variants_upd_version AFTER UPDATE ON variants
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_variants_del_version AFTER DELETE ON variants
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_product_images_ins_version AFTER INSERT ON product_images
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_product_images_upd_version AFTER UPDATE ON product_images
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_product_images_del_version AFTER DELETE ON product_images
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'catalog_version';
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_inventory_ins_version AFTER INSERT ON inventory
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'inventory_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_inventory_upd_version AFTER UPDATE ON inventory
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'inventory_version';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_inventory_del_version AFTER DELETE ON inventory
+BEGIN
+  UPDATE config SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now') WHERE key = 'inventory_version';
+END;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     name: '001-baseline',
@@ -429,6 +496,12 @@ export const MIGRATIONS: readonly Migration[] = [
           err,
         );
       }
+    },
+  },
+  {
+    name: '002-cache-versions',
+    up(sql) {
+      sql.exec(CACHE_VERSIONS_SCHEMA);
     },
   },
 ];

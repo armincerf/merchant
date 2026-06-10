@@ -6,6 +6,22 @@ import { ApiError, type HonoEnv, now } from '../types';
 // AUTH MIDDLEWARE
 // ============================================================
 
+// In-isolate memo of api-key hash → role, so repeat callers skip the
+// per-request DO round trip (the DO serializes ALL traffic; auth lookups were
+// one of its biggest request classes). Positive lookups only — unknown keys
+// always hit the DO. Key deletion clears this isolate's memo immediately
+// (routes/keys.ts); other isolates can honor a revoked key for up to
+// AUTH_MEMO_TTL_MS. OAuth tokens are never memoized: they expire and carry
+// scopes, so they stay on the DO path.
+export const AUTH_MEMO_TTL_MS = 60_000;
+const AUTH_MEMO_MAX_ENTRIES = 500;
+const keyRoleMemo = new Map<string, { role: 'public' | 'admin'; expiresAt: number }>();
+
+/** Drop all memoized key roles in this isolate (call after key revocation). */
+export function clearAuthMemo(): void {
+  keyRoleMemo.clear();
+}
+
 export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
   const authHeader = c.req.header('Authorization');
 
@@ -46,6 +62,19 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
   }
 
   const keyHash = await hashKey(token);
+
+  const memoized = keyRoleMemo.get(keyHash);
+  if (memoized && memoized.expiresAt > Date.now()) {
+    c.set('auth', {
+      role: memoized.role,
+      stripeSecretKey,
+      stripeWebhookSecret,
+    });
+
+    await next();
+    return;
+  }
+
   const result = await db.query<any>(`SELECT role FROM api_keys WHERE key_hash = ? LIMIT 1`, [
     keyHash,
   ]);
@@ -53,6 +82,11 @@ export const authMiddleware = createMiddleware<HonoEnv>(async (c, next) => {
   if (result.length === 0) {
     throw ApiError.unauthorized('Invalid API key');
   }
+
+  if (keyRoleMemo.size >= AUTH_MEMO_MAX_ENTRIES) {
+    keyRoleMemo.clear();
+  }
+  keyRoleMemo.set(keyHash, { role: result[0].role, expiresAt: Date.now() + AUTH_MEMO_TTL_MS });
 
   c.set('auth', {
     role: result[0].role,

@@ -3,6 +3,7 @@ import { getDb } from '../db';
 import { createApp } from '../lib/app';
 import { checkLowInventory } from '../lib/webhooks';
 import { adminOnly, authMiddleware } from '../middleware/auth';
+import { publicCache } from '../middleware/cache';
 import {
   AdjustInventoryBody,
   AvailabilityResponse,
@@ -15,6 +16,8 @@ import {
 import { ApiError, now, uuid } from '../types';
 
 const app = createApp();
+
+app.use('/available', publicCache('inventory'));
 
 // Public endpoint — no auth required
 const getAvailability = createRoute({

@@ -3,6 +3,7 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import { cors } from 'hono/cors';
 import { MerchantDO } from './do';
 import { retryFailedDeliveries } from './lib/webhooks';
+import { versionMemoInvalidator } from './middleware/cache';
 import { rateLimitMiddleware } from './middleware/rate-limit';
 import { analytics } from './routes/analytics';
 import { catalog } from './routes/catalog';
@@ -36,6 +37,8 @@ app.use('*', async (c, next) => {
   c.set('db', stub as unknown as DOStub);
   await next();
 });
+
+app.use('*', versionMemoInvalidator);
 
 app.use('/v1/*', rateLimitMiddleware());
 app.use('/oauth/*', rateLimitMiddleware());
